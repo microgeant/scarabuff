@@ -1,0 +1,13 @@
+.gradle/
+build/
+out/
+.idea/
+*.iml
+.DS_Store
+local.properties
+generated/
+example/.gradle/
+example/build/
+.direnv/
+result
+result-*
