@@ -72,9 +72,10 @@ jar — this is a real failure this project hit and worked around during develop
   the comment there) together with `flatbuffersJava`/`flatbuffersJavaGrpc` in
   `gradle/libs.versions.toml`, in the same commit.
 
-`flake.nix` was written and hash-verified (`shasum -a 256` against the published GitHub release
-assets) without a local Nix installation to test against — run `nix flake check` /
-`nix develop` once after cloning to confirm it evaluates and builds on your machine.
+`flake.nix` has been verified end-to-end: `nix flake check` passes, `nix build .#flatc` produces
+a working `flatc version 25.2.10`, and `nix develop -c bash -c 'cd example && ./gradlew test'`
+runs all four round-trip tests green with no manual `$FLATC` override. `flake.lock` pins the
+exact `nixpkgs` revision that was verified against.
 
 ## Using the Gradle plugin
 
