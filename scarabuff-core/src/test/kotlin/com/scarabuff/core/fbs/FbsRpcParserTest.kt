@@ -5,7 +5,7 @@ import org.junit.jupiter.api.Test
 
 class FbsRpcParserTest {
 
-    /** Mirrors the structure of Protoloop's real clip.fbs: one service per streaming kind. */
+    /** Mirrors the structure of a real-world clip.fbs: one service per streaming kind. */
     private val fourKindsSchema = """
         namespace com.example.echo;
 

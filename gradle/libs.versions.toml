@@ -1,5 +1,5 @@
 [versions]
-# Pinned to match Protoloop's buildSrc/dependencies.gradle so generated code
+# Pinned to match the target project's buildSrc/dependencies.gradle so generated code
 # is drop-in compatible with that project. flatc's own compiler version
 # (pinned separately in flake.nix) must equal flatbuffersJava, since
 # FlatBuffers releases flatc and every language runtime under one version.

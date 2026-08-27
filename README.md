@@ -1,6 +1,6 @@
 # scarabuff
 
-A [kroto-plus](https://github.com/marcoferrer/kroto-plus)-alike for FlatBuffers: point it at a
+A code generator for FlatBuffers: point it at a
 directory of `.fbs` files that define `rpc_service`s, and it generates the FlatBuffers Java +
 gRPC base classes (via `flatc`) plus a Kotlin coroutine wrapper — a `<Service>GrpcKt` object with
 a `CoroutineStub` (client) and an abstract `CoroutineImplBase` (server) — for all four gRPC
@@ -119,17 +119,6 @@ scarabuff-cli/build/install/scarabuff-cli/bin/scarabuff-cli \
   --flatc "$FLATC"
 ```
 
-## Migrating Protoloop onto this
-
-Protoloop's `modules/common/flatbuffers-protoloop-coroutines-stub` hand-writes exactly what
-`GrpcCoroutineGenerator` produces (verified against `ClipAudioServiceGrpcKt.kt` and its three
-siblings during development — the generator's output matches that pattern method-for-method).
-Adopting it there would mean: apply `com.scarabuff.grpc` to
-`flatbuffers-protoloop-stub/build.gradle` in place of its hand-rolled `generateFbsJava` `Exec`
-task (which currently shells out to a hardcoded, unpinned `/tmp/flatc_dir/flatc`), delete the
-`flatbuffers-protoloop-coroutines-stub` module entirely, and point `scarabuff.flatc` at a
-`flatc` pinned via this repo's `flake.nix` pattern.
-
 ## Development
 
 ```
@@ -137,3 +126,35 @@ nix develop            # flatc (pinned), JDK 17, Gradle on PATH, $FLATC exported
 ./gradlew build         # scarabuff-core, scarabuff-gradle-plugin, scarabuff-cli
 cd example && ./gradlew test   # end-to-end round-trip proof, all 4 streaming kinds
 ```
+
+### Other flake commands
+
+`flake.nix` exposes two outputs per supported system (`x86_64-linux`, `x86_64-darwin`,
+`aarch64-darwin` — see the comment in `flake.nix` for why `aarch64-linux` is intentionally
+excluded): `packages.<system>.flatc` (aliased as `packages.<system>.default`) and
+`devShells.<system>.default`. A few ways to use them beyond `nix develop`:
+
+```
+# Run a single command inside the devShell without dropping into it interactively
+nix develop -c ./gradlew build
+nix develop -c bash -c 'cd example && ./gradlew test'
+
+# Build just the pinned flatc derivation, without JDK/Gradle
+nix build .#flatc          # or `nix build` — flatc is the default package
+result/bin/flatc --version
+
+# Run the pinned flatc directly, without a `nix build` step first
+nix run .#flatc -- --version
+
+# List everything the flake exposes (packages, devShells, etc.)
+nix flake show
+
+# Validate the flake evaluates and builds cleanly on the current system
+nix flake check
+
+# Update the pinned nixpkgs revision (rewrites flake.lock)
+nix flake update
+```
+
+Every command above is reproducible off `flake.lock` — no `nix-channel`/`NIX_PATH` involved, and
+no dependency on whatever `flatc`/JDK/Gradle happen to already be on your machine.

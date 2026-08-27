@@ -15,7 +15,7 @@ import com.squareup.kotlinpoet.TypeSpec
 
 /**
  * Generates a `<Service>GrpcKt` coroutine wrapper object for a single `rpc_service`, matching
- * the hand-written pattern already used in Protoloop (see e.g. `ClipAudioServiceGrpcKt.kt`):
+ * the standard hand-written coroutine-stub pattern:
  * a `serviceDescriptor`, one `MethodDescriptor` property per RPC, a `CoroutineStub` client class,
  * and an abstract `CoroutineImplBase` server class — with the exact `ClientCalls`/`ServerCalls`
  * function and suspend/Flow shape depending on the RPC's streaming kind.
@@ -81,8 +81,7 @@ object GrpcCoroutineGenerator {
     /**
      * @param javaPackage the package flatc emitted `<Service>Grpc`/request/response classes into
      * @param kotlinPackage the package to emit the generated `<Service>GrpcKt` file into; defaults
-     *   to [javaPackage] (kroto-plus's default: colocate the coroutine wrapper with the generated
-     *   Java stub it wraps)
+     *   to [javaPackage] (colocate the coroutine wrapper with the generated Java stub it wraps)
      */
     fun generate(
         service: RpcServiceDef,
