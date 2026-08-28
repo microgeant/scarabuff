@@ -1,5 +1,6 @@
 package com.scarabuff.core.codegen
 
+import com.scarabuff.core.fbs.RpcMethod
 import com.scarabuff.core.fbs.RpcServiceDef
 import com.scarabuff.core.fbs.StreamingKind
 import com.squareup.kotlinpoet.AnnotationSpec
@@ -14,11 +15,19 @@ import com.squareup.kotlinpoet.PropertySpec
 import com.squareup.kotlinpoet.TypeSpec
 
 /**
- * Generates a `<Service>GrpcKt` coroutine wrapper object for a single `rpc_service`, matching
- * the standard hand-written coroutine-stub pattern:
- * a `serviceDescriptor`, one `MethodDescriptor` property per RPC, a `CoroutineStub` client class,
- * and an abstract `CoroutineImplBase` server class — with the exact `ClientCalls`/`ServerCalls`
- * function and suspend/Flow shape depending on the RPC's streaming kind.
+ * Generates a self-contained `<Service>GrpcKt` coroutine wrapper object for a single
+ * `rpc_service` — matching the standard hand-written coroutine-stub pattern (`serviceDescriptor`,
+ * one `MethodDescriptor` property per RPC, a `CoroutineStub` client class, and an abstract
+ * `CoroutineImplBase` server class) but built entirely from Kotlin: the `ServiceDescriptor` and
+ * `MethodDescriptor`s (including their FlatBuffers marshallers) are constructed here rather than
+ * delegated to a flatc-generated Java `<Service>Grpc` class, since flatc's `--grpc` generator has
+ * no Kotlin backend. This is what makes it possible to point flatc at `--kotlin` instead of
+ * `--java` and get a build with no generated `.java` files at all.
+ *
+ * The marshaller construction mirrors what flatc's Java `--grpc` output does via
+ * `com.google.flatbuffers.grpc.FlatbuffersUtils.marshaller`, which is generic over any
+ * `com.google.flatbuffers.Table` subclass — flatc's `--kotlin` output classes extend that same
+ * base class, so it works unchanged against them.
  */
 object GrpcCoroutineGenerator {
 
@@ -26,6 +35,7 @@ object GrpcCoroutineGenerator {
     private val CHANNEL = ClassName("io.grpc", "Channel")
     private val METADATA = ClassName("io.grpc", "Metadata")
     private val METHOD_DESCRIPTOR = ClassName("io.grpc", "MethodDescriptor")
+    private val METHOD_TYPE = ClassName("io.grpc", "MethodDescriptor", "MethodType")
     private val SERVER_SERVICE_DEFINITION = ClassName("io.grpc", "ServerServiceDefinition")
     private val SERVICE_DESCRIPTOR = ClassName("io.grpc", "ServiceDescriptor")
     private val STATUS = ClassName("io.grpc", "Status")
@@ -38,10 +48,14 @@ object GrpcCoroutineGenerator {
     private val COROUTINE_CONTEXT = ClassName("kotlin.coroutines", "CoroutineContext")
     private val EMPTY_COROUTINE_CONTEXT = ClassName("kotlin.coroutines", "EmptyCoroutineContext")
     private val FLOW = ClassName("kotlinx.coroutines.flow", "Flow")
+    private val BYTE_BUFFER = ClassName("java.nio", "ByteBuffer")
+    private val FLATBUFFERS_UTILS = ClassName("com.google.flatbuffers.grpc", "FlatbuffersUtils")
+    private val FB_EXTRACTOR = ClassName("com.google.flatbuffers.grpc", "FlatbuffersUtils", "FBExtactor")
 
     private data class StreamingStrategy(
         val clientCallFunction: String,
         val serverBindFunction: String,
+        val methodType: String,
         val isSuspend: Boolean,
         val requestIsFlow: Boolean,
         val responseIsFlow: Boolean,
@@ -51,6 +65,7 @@ object GrpcCoroutineGenerator {
         StreamingKind.UNARY to StreamingStrategy(
             clientCallFunction = "unaryRpc",
             serverBindFunction = "unaryServerMethodDefinition",
+            methodType = "UNARY",
             isSuspend = true,
             requestIsFlow = false,
             responseIsFlow = false,
@@ -58,6 +73,7 @@ object GrpcCoroutineGenerator {
         StreamingKind.SERVER to StreamingStrategy(
             clientCallFunction = "serverStreamingRpc",
             serverBindFunction = "serverStreamingServerMethodDefinition",
+            methodType = "SERVER_STREAMING",
             isSuspend = false,
             requestIsFlow = false,
             responseIsFlow = true,
@@ -65,6 +81,7 @@ object GrpcCoroutineGenerator {
         StreamingKind.CLIENT to StreamingStrategy(
             clientCallFunction = "clientStreamingRpc",
             serverBindFunction = "clientStreamingServerMethodDefinition",
+            methodType = "CLIENT_STREAMING",
             isSuspend = true,
             requestIsFlow = true,
             responseIsFlow = false,
@@ -72,6 +89,7 @@ object GrpcCoroutineGenerator {
         StreamingKind.BIDI to StreamingStrategy(
             clientCallFunction = "bidiStreamingRpc",
             serverBindFunction = "bidiStreamingServerMethodDefinition",
+            methodType = "BIDI_STREAMING",
             isSuspend = false,
             requestIsFlow = true,
             responseIsFlow = true,
@@ -79,64 +97,108 @@ object GrpcCoroutineGenerator {
     )
 
     /**
-     * @param javaPackage the package flatc emitted `<Service>Grpc`/request/response classes into
+     * @param dataPackage the package flatc's `--kotlin` output emitted `<Type>` table classes into
      * @param kotlinPackage the package to emit the generated `<Service>GrpcKt` file into; defaults
-     *   to [javaPackage] (colocate the coroutine wrapper with the generated Java stub it wraps)
+     *   to [dataPackage] (colocate the coroutine wrapper with the flatc-generated table classes it
+     *   wraps)
      */
     fun generate(
         service: RpcServiceDef,
-        javaPackage: String,
-        kotlinPackage: String = javaPackage,
+        dataPackage: String,
+        kotlinPackage: String = dataPackage,
     ): FileSpec {
-        val serviceGrpcClass = ClassName(javaPackage, "${service.name}Grpc")
         val objectName = "${service.name}GrpcKt"
+        val serviceNameConst = "$dataPackage.${service.name}"
 
         val objectBuilder = TypeSpec.objectBuilder(objectName)
-            .addProperty(serviceDescriptorProperty(serviceGrpcClass))
+            .addProperty(
+                PropertySpec.builder("SERVICE_NAME", String::class)
+                    .addModifiers(KModifier.PRIVATE, KModifier.CONST)
+                    .initializer("%S", serviceNameConst)
+                    .build()
+            )
 
         for (method in service.methods) {
-            objectBuilder.addProperty(methodDescriptorProperty(method.name, javaPackage, serviceGrpcClass, method.requestType, method.responseType))
+            objectBuilder.addProperty(methodDescriptorProperty(method, dataPackage))
         }
+        objectBuilder.addProperty(serviceDescriptorProperty(service))
 
-        objectBuilder.addType(buildStubClass(service, serviceGrpcClass, javaPackage))
-        objectBuilder.addType(buildImplBaseClass(service, serviceGrpcClass, javaPackage))
+        objectBuilder.addType(buildStubClass(service, dataPackage))
+        objectBuilder.addType(buildImplBaseClass(service, dataPackage))
 
         return FileSpec.builder(kotlinPackage, objectName)
             .addType(objectBuilder.build())
             .build()
     }
 
-    private fun serviceDescriptorProperty(serviceGrpcClass: ClassName): PropertySpec =
-        PropertySpec.builder("serviceDescriptor", SERVICE_DESCRIPTOR)
-            .getter(
-                FunSpec.getterBuilder()
-                    .addAnnotation(JvmStatic::class)
-                    .addStatement("return %T.getServiceDescriptor()", serviceGrpcClass)
+    private fun lazyDelegate(body: CodeBlock): CodeBlock =
+        CodeBlock.builder()
+            .add("lazy {\n")
+            .indent()
+            .add(body)
+            .unindent()
+            .add("}")
+            .build()
+
+    private fun extractorExpression(typeClass: ClassName): TypeSpec =
+        TypeSpec.anonymousClassBuilder()
+            .superclass(FB_EXTRACTOR.parameterizedBy(typeClass))
+            .addFunction(
+                FunSpec.builder("extract")
+                    .addModifiers(KModifier.OVERRIDE)
+                    .addParameter("buffer", BYTE_BUFFER)
+                    .returns(typeClass)
+                    .addStatement("return %T.getRootAs%L(buffer)", typeClass, typeClass.simpleName)
                     .build()
             )
             .build()
 
-    private fun methodDescriptorProperty(
-        methodName: String,
-        javaPackage: String,
-        serviceGrpcClass: ClassName,
-        requestType: String,
-        responseType: String,
-    ): PropertySpec {
-        val requestClass = ClassName(javaPackage, requestType)
-        val responseClass = ClassName(javaPackage, responseType)
+    private fun marshallerExpression(typeClass: ClassName): CodeBlock =
+        CodeBlock.of(
+            "%T.marshaller(%T::class.java, %L)",
+            FLATBUFFERS_UTILS, typeClass, extractorExpression(typeClass),
+        )
+
+    private fun methodDescriptorProperty(method: RpcMethod, dataPackage: String): PropertySpec {
+        val strategy = STRATEGIES.getValue(method.streaming)
+        val requestClass = ClassName(dataPackage, method.requestType)
+        val responseClass = ClassName(dataPackage, method.responseType)
         val type = METHOD_DESCRIPTOR.parameterizedBy(requestClass, responseClass)
-        return PropertySpec.builder("get${methodName}Method", type)
-            .getter(
-                FunSpec.getterBuilder()
-                    .addAnnotation(JvmStatic::class)
-                    .addStatement("return %T.get${methodName}Method()", serviceGrpcClass)
-                    .build()
-            )
+
+        val body = CodeBlock.builder()
+            .add("%T.newBuilder<%T, %T>()\n", METHOD_DESCRIPTOR, requestClass, responseClass)
+            .indent()
+            .add(".setType(%T.%L)\n", METHOD_TYPE, strategy.methodType)
+            .add(".setFullMethodName(%T.generateFullMethodName(SERVICE_NAME, %S))\n", METHOD_DESCRIPTOR, method.name)
+            .add(".setSampledToLocalTracing(true)\n")
+            .add(".setRequestMarshaller(%L)\n", marshallerExpression(requestClass))
+            .add(".setResponseMarshaller(%L)\n", marshallerExpression(responseClass))
+            .add(".build()\n")
+            .unindent()
+            .build()
+
+        return PropertySpec.builder("get${method.name}Method", type)
+            .addAnnotation(JvmStatic::class)
+            .delegate(lazyDelegate(body))
             .build()
     }
 
-    private fun buildStubClass(service: RpcServiceDef, serviceGrpcClass: ClassName, javaPackage: String): TypeSpec {
+    private fun serviceDescriptorProperty(service: RpcServiceDef): PropertySpec {
+        val body = CodeBlock.builder()
+            .add("%T.newBuilder(SERVICE_NAME)\n", SERVICE_DESCRIPTOR)
+            .indent()
+            .apply { for (method in service.methods) add(".addMethod(get%LMethod)\n", method.name) }
+            .add(".build()\n")
+            .unindent()
+            .build()
+
+        return PropertySpec.builder("serviceDescriptor", SERVICE_DESCRIPTOR)
+            .addAnnotation(JvmStatic::class)
+            .delegate(lazyDelegate(body))
+            .build()
+    }
+
+    private fun buildStubClass(service: RpcServiceDef, dataPackage: String): TypeSpec {
         val stubClassName = "${service.name}CoroutineStub"
         val selfType = ClassName("", stubClassName)
 
@@ -153,7 +215,7 @@ object GrpcCoroutineGenerator {
         val builder = TypeSpec.classBuilder(stubClassName)
             .addAnnotation(
                 AnnotationSpec.builder(STUB_FOR)
-                    .addMember("%T::class", serviceGrpcClass)
+                    .addMember("%L::class", "${service.name}GrpcKt")
                     .build()
             )
             .primaryConstructor(constructor)
@@ -172,8 +234,8 @@ object GrpcCoroutineGenerator {
 
         for (method in service.methods) {
             val strategy = STRATEGIES.getValue(method.streaming)
-            val requestClass = ClassName(javaPackage, method.requestType)
-            val responseClass = ClassName(javaPackage, method.responseType)
+            val requestClass = ClassName(dataPackage, method.requestType)
+            val responseClass = ClassName(dataPackage, method.responseType)
             val paramName = decapitalize(method.requestType)
             val paramType = if (strategy.requestIsFlow) FLOW.parameterizedBy(requestClass) else requestClass
             val returnType = if (strategy.responseIsFlow) FLOW.parameterizedBy(responseClass) else responseClass
@@ -202,7 +264,7 @@ object GrpcCoroutineGenerator {
         return builder.build()
     }
 
-    private fun buildImplBaseClass(service: RpcServiceDef, serviceGrpcClass: ClassName, javaPackage: String): TypeSpec {
+    private fun buildImplBaseClass(service: RpcServiceDef, dataPackage: String): TypeSpec {
         val implClassName = "${service.name}CoroutineImplBase"
 
         val constructor = FunSpec.constructorBuilder()
@@ -221,8 +283,8 @@ object GrpcCoroutineGenerator {
 
         for (method in service.methods) {
             val strategy = STRATEGIES.getValue(method.streaming)
-            val requestClass = ClassName(javaPackage, method.requestType)
-            val responseClass = ClassName(javaPackage, method.responseType)
+            val requestClass = ClassName(dataPackage, method.requestType)
+            val responseClass = ClassName(dataPackage, method.responseType)
             val paramName = decapitalize(method.requestType)
             val paramType = if (strategy.requestIsFlow) FLOW.parameterizedBy(requestClass) else requestClass
             val returnType = if (strategy.responseIsFlow) FLOW.parameterizedBy(responseClass) else responseClass
@@ -245,7 +307,7 @@ object GrpcCoroutineGenerator {
         val bindServiceCode = CodeBlock.builder()
             .add("return %T.builder(\n", SERVER_SERVICE_DEFINITION)
             .indent()
-            .add("%T.getServiceDescriptor()\n", serviceGrpcClass)
+            .add("serviceDescriptor\n")
             .unindent()
             .add(")")
         for (method in service.methods) {

@@ -1,10 +1,14 @@
 # scarabuff
 
 A code generator for FlatBuffers: point it at a
-directory of `.fbs` files that define `rpc_service`s, and it generates the FlatBuffers Java +
-gRPC base classes (via `flatc`) plus a Kotlin coroutine wrapper — a `<Service>GrpcKt` object with
-a `CoroutineStub` (client) and an abstract `CoroutineImplBase` (server) — for all four gRPC
-shapes: unary, server-streaming, client-streaming, and bidirectional-streaming.
+directory of `.fbs` files that define `rpc_service`s, and it generates the FlatBuffers table
+classes (via `flatc --kotlin`) plus a `<Service>GrpcKt` object with a `serviceDescriptor`, one
+`MethodDescriptor` per RPC, a `CoroutineStub` (client), and an abstract `CoroutineImplBase`
+(server) — for all four gRPC shapes: unary, server-streaming, client-streaming, and
+bidirectional-streaming. The output is pure Kotlin, no generated `.java` files: flatc's `--grpc`
+generator has no Kotlin backend, so scarabuff builds the `ServiceDescriptor`/`MethodDescriptor`/
+marshaller glue itself (see [Why it's pure Kotlin](#why-its-pure-kotlin)) instead of delegating to
+a flatc-generated Java `<Service>Grpc` class the way a hand-rolled setup normally would.
 
 It exists to delete hand-written boilerplate like this (one file per service, one per streaming
 kind, ~50-80 nearly-identical lines each):
@@ -42,8 +46,8 @@ rpc_service ClipAudioService {
   generator (`GrpcCoroutineGenerator`), and an `Orchestrator` that runs `flatc` and the generator
   together. Both front ends below call the same `Orchestrator.generate(...)`.
 - **`scarabuff-gradle-plugin`** — applies a `scarabuff { ... }` extension and a
-  `generateScarabuffSources` task, wired into the `main` source set (both `java` and `kotlin`)
-  ahead of `compileJava`/`compileKotlin`. This is the primary way to use scarabuff.
+  `generateScarabuffSources` task, wired into the `main` Kotlin source set ahead of
+  `compileKotlin`. This is the primary way to use scarabuff.
 - **`scarabuff-cli`** — a thin standalone wrapper (`--schema-dir`, `--out-dir`, `--flatc`,
   `--kotlin-package-suffix`) for non-Gradle use, built as a fat jar via the shadow plugin.
 - **`example/`** — a self-contained sample project (its own Gradle build, pulling the plugin in
@@ -51,6 +55,24 @@ rpc_service ClipAudioService {
   (one service per streaming kind) and `EchoRoundTripTest.kt`, which starts a real in-process
   gRPC server and client using the generated stubs and asserts real round-trip responses for all
   four RPC kinds. This is the thing to run if you want proof it actually works, not just compiles.
+
+## Why it's pure Kotlin
+
+flatc's `--grpc` flag has no Kotlin implementation — running `flatc --kotlin --grpc` prints
+`GRPC interface generator not implemented for Kotlin` and silently emits only the table classes,
+nothing gRPC-related. Normally (e.g. for Java) `--grpc` is what generates the `<Service>Grpc`
+class holding the `ServiceDescriptor`, one `MethodDescriptor` per RPC, and the FlatBuffers
+marshallers that turn a `ByteBuffer` into a table instance and back — a hand-written coroutine
+wrapper would then just delegate to that class's static accessors.
+
+Since that class doesn't exist for Kotlin, `GrpcCoroutineGenerator` builds the same
+`ServiceDescriptor`/`MethodDescriptor`/marshaller logic itself via KotlinPoet, targeting the
+`--kotlin`-generated table classes directly. This works because those classes extend the exact
+same `com.google.flatbuffers.Table` base class the Java ones do, and
+`com.google.flatbuffers.grpc.FlatbuffersUtils.marshaller(...)` (from the `flatbuffers-java-grpc`
+runtime jar, still a regular dependency — not generated code) is generic over any `Table`
+subclass. So `Orchestrator` runs `flatc --kotlin` (no `--java`, no `--grpc`) and the entire
+generated output — table classes and gRPC wrapper alike — is Kotlin.
 
 ## Version pinning
 
@@ -99,11 +121,11 @@ plugins {
 scarabuff {
     // schemaDir defaults to src/main/fbs, outputDir to build/generated/source/scarabuff
     // flatc defaults to $FLATC (set by `nix develop`), then `flatc` on PATH
-    // kotlinPackageSuffix defaults to "" (coroutine wrapper colocated with the flatc Java output)
+    // kotlinPackageSuffix defaults to "" (coroutine wrapper colocated with the flatc Kotlin output)
 }
 ```
 
-`generateScarabuffSources` then runs automatically before `compileJava`/`compileKotlin`. You
+`generateScarabuffSources` then runs automatically before `compileKotlin`. You
 still need the runtime dependencies yourself (`com.google.flatbuffers:flatbuffers-java`,
 `:flatbuffers-java-grpc`, `io.grpc:grpc-stub`, `io.grpc:grpc-kotlin-stub`, a gRPC transport like
 `io.grpc:grpc-netty`, `org.jetbrains.kotlinx:kotlinx-coroutines-core`) — see

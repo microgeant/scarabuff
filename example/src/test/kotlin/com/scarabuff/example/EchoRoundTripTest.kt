@@ -50,31 +50,31 @@ class EchoRoundTripTest {
     fun `unary echo`() = runBlocking {
         startServer(object : EchoServiceCoroutineImplBase() {
             override suspend fun echo(echoRequest: EchoRequest): EchoResponse =
-                echoResponse("echo: ${echoRequest.message()}")
+                echoResponse("echo: ${echoRequest.message}")
         })
 
         val response = EchoServiceCoroutineStub(channel).echo(echoRequest("hello"))
 
-        assertThat(response.message()).isEqualTo("echo: hello")
+        assertThat(response.message).isEqualTo("echo: hello")
     }
 
     @Test
     fun `server streaming echo`() = runBlocking {
         startServer(object : EchoStreamServiceCoroutineImplBase() {
             override fun observeEcho(echoRequest: EchoRequest): Flow<EchoResponse> =
-                flowOf(1, 2, 3).map { echoResponse("${echoRequest.message()}-$it") }
+                flowOf(1, 2, 3).map { echoResponse("${echoRequest.message}-$it") }
         })
 
         val responses = EchoStreamServiceCoroutineStub(channel).observeEcho(echoRequest("tick")).toList()
 
-        assertThat(responses.map { it.message() }).containsExactly("tick-1", "tick-2", "tick-3").inOrder()
+        assertThat(responses.map { it.message }).containsExactly("tick-1", "tick-2", "tick-3").inOrder()
     }
 
     @Test
     fun `client streaming echo`() = runBlocking {
         startServer(object : EchoCollectServiceCoroutineImplBase() {
             override suspend fun collectEcho(echoRequest: Flow<EchoRequest>): EchoResponse {
-                val messages = echoRequest.toList().map { it.message() }
+                val messages = echoRequest.toList().map { it.message }
                 return echoResponse(messages.joinToString(","))
             }
         })
@@ -82,20 +82,20 @@ class EchoRoundTripTest {
         val requests = flowOf("a", "b", "c").map { echoRequest(it) }
         val response = EchoCollectServiceCoroutineStub(channel).collectEcho(requests)
 
-        assertThat(response.message()).isEqualTo("a,b,c")
+        assertThat(response.message).isEqualTo("a,b,c")
     }
 
     @Test
     fun `bidi streaming echo`() = runBlocking {
         startServer(object : EchoChatServiceCoroutineImplBase() {
             override fun chatEcho(echoRequest: Flow<EchoRequest>): Flow<EchoResponse> =
-                echoRequest.map { echoResponse("chat:${it.message()}") }
+                echoRequest.map { echoResponse("chat:${it.message}") }
         })
 
         val requests = flowOf("x", "y").map { echoRequest(it) }
         val responses = EchoChatServiceCoroutineStub(channel).chatEcho(requests).toList()
 
-        assertThat(responses.map { it.message() }).containsExactly("chat:x", "chat:y").inOrder()
+        assertThat(responses.map { it.message }).containsExactly("chat:x", "chat:y").inOrder()
     }
 
     private fun echoRequest(message: String): EchoRequest {

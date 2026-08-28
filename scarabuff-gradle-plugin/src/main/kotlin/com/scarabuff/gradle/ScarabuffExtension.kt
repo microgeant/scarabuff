@@ -16,7 +16,7 @@ abstract class ScarabuffExtension @Inject constructor(
     /** Directory containing `.fbs` schemas. Defaults to `src/main/fbs`. */
     val schemaDir: DirectoryProperty = objects.directoryProperty()
 
-    /** Where generated Java (`<dir>/java`) and Kotlin (`<dir>/kotlin`) sources land. */
+    /** Where generated Kotlin sources land. */
     val outputDir: DirectoryProperty = objects.directoryProperty()
 
     /**
@@ -29,7 +29,7 @@ abstract class ScarabuffExtension @Inject constructor(
 
     /**
      * Appended to each schema's `namespace` to form the package generated `<Service>GrpcKt.kt`
-     * files are written into. Empty (default) colocates them with the flatc-generated Java
+     * files are written into. Empty (default) colocates them with the flatc-generated table
      * classes they wrap; pass e.g. `.coroutines` to put them in a subpackage instead.
      */
     val kotlinPackageSuffix: Property<String> = objects.property(String::class.java).convention("")
