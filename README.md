@@ -51,7 +51,7 @@ rpc_service ClipAudioService {
 - **`scarabuff-cli`** — a thin standalone wrapper (`--schema-dir`, `--out-dir`, `--flatc`,
   `--kotlin-package-suffix`) for non-Gradle use, built as a fat jar via the shadow plugin.
 - **`example/`** — a self-contained sample project (its own Gradle build, pulling the plugin in
-  via `includeBuild("..")` — scarabuff isn't published anywhere) with a 4-service `echo.fbs`
+  via `includeBuild("..")` so it always tests the working tree) with a 4-service `echo.fbs`
   (one service per streaming kind) and `EchoRoundTripTest.kt`, which starts a real in-process
   gRPC server and client using the generated stubs and asserts real round-trip responses for all
   four RPC kinds. This is the thing to run if you want proof it actually works, not just compiles.
@@ -101,21 +101,14 @@ exact `nixpkgs` revision that was verified against.
 
 ## Using the Gradle plugin
 
-Since scarabuff isn't published to a repository, consume it via a composite build — see
-`example/settings.gradle.kts`:
-
-```kotlin
-// settings.gradle.kts
-pluginManagement {
-    includeBuild("../path/to/scarabuff")
-}
-```
+The plugin is published to the [Gradle Plugin Portal](https://plugins.gradle.org/plugin/io.github.microgeant.scarabuff)
+as `io.github.microgeant.scarabuff`, so no extra repository configuration is needed:
 
 ```kotlin
 // build.gradle.kts
 plugins {
     kotlin("jvm")
-    id("com.scarabuff.grpc")
+    id("io.github.microgeant.scarabuff") version "0.2.0"
 }
 
 scarabuff {
@@ -130,6 +123,31 @@ still need the runtime dependencies yourself (`com.google.flatbuffers:flatbuffer
 `:flatbuffers-java-grpc`, `io.grpc:grpc-stub`, `io.grpc:grpc-kotlin-stub`, a gRPC transport like
 `io.grpc:grpc-netty`, `org.jetbrains.kotlinx:kotlinx-coroutines-core`) — see
 `example/build.gradle.kts` for a complete, working set at the pinned versions.
+
+To use an unreleased checkout instead, consume it as a composite build (this is what `example/`
+does) and drop the `version` from the `plugins {}` block:
+
+```kotlin
+// settings.gradle.kts
+pluginManagement {
+    includeBuild("../path/to/scarabuff")
+}
+```
+
+## Releasing
+
+Publishing is done by [`.github/workflows/publish.yml`](.github/workflows/publish.yml):
+
+1. One-time: create API keys at <https://plugins.gradle.org> and add them as the GitHub repo
+   secrets `GRADLE_PUBLISH_KEY` / `GRADLE_PUBLISH_SECRET`.
+2. Bump `version` in `gradle.properties`, commit, then tag and push: `git tag v0.2.0 && git push
+   origin v0.2.0`. The workflow checks the tag matches the version, runs the build and the
+   example's round-trip tests inside `nix develop`, then runs `publishPlugins`.
+
+`scarabuff-core` isn't published separately: it's bundled into the plugin jar via the shadow
+plugin, with its own dependencies (KotlinPoet) left as normal POM dependencies. To publish by
+hand instead, run `./gradlew :scarabuff-gradle-plugin:publishPlugins` with the keys set in
+`~/.gradle/gradle.properties` as `gradle.publish.key` / `gradle.publish.secret`.
 
 ## Using the CLI
 
@@ -180,3 +198,7 @@ nix flake update
 
 Every command above is reproducible off `flake.lock` — no `nix-channel`/`NIX_PATH` involved, and
 no dependency on whatever `flatc`/JDK/Gradle happen to already be on your machine.
+
+## License
+
+Apache License 2.0 — see [`LICENSE`](LICENSE).

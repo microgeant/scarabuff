@@ -1,6 +1,6 @@
 plugins {
     kotlin("jvm") version "1.9.0"
-    id("com.scarabuff.grpc")
+    id("io.github.microgeant.scarabuff")
 }
 
 // Versions here must match gradle/libs.versions.toml in the parent project — this build is

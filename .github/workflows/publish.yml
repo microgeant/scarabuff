@@ -1,0 +1,36 @@
+name: Publish Gradle plugin
+
+# Push a tag like `v0.2.0` (matching `version` in gradle.properties) to publish that version to
+# the Gradle Plugin Portal. Requires repo secrets GRADLE_PUBLISH_KEY and GRADLE_PUBLISH_SECRET
+# (from https://plugins.gradle.org/u/<you> → API Keys).
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches gradle.properties version
+        run: |
+          version="$(sed -n 's/^version=//p' gradle.properties)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match version=$version in gradle.properties" >&2
+            exit 1
+          fi
+
+      - uses: cachix/install-nix-action@v27
+
+      # The devShell provides the pinned flatc, JDK 17 and $FLATC, same as local development.
+      - name: Build and test
+        run: |
+          nix develop -c ./gradlew build
+          nix develop -c bash -c 'cd example && ./gradlew test'
+
+      - name: Publish to Gradle Plugin Portal
+        env:
+          GRADLE_PUBLISH_KEY: ${{ secrets.GRADLE_PUBLISH_KEY }}
+          GRADLE_PUBLISH_SECRET: ${{ secrets.GRADLE_PUBLISH_SECRET }}
+        run: nix develop -c ./gradlew :scarabuff-gradle-plugin:publishPlugins
