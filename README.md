@@ -39,7 +39,152 @@ rpc_service ClipAudioService {
 }
 ```
 
-## Project layout
+## Quick start
+
+**1. Apply the plugin** (published on the
+[Gradle Plugin Portal](https://plugins.gradle.org/plugin/io.github.microgeant.scarabuff)):
+
+```kotlin
+// build.gradle.kts
+plugins {
+    kotlin("jvm") version "1.9.0"
+    id("io.github.microgeant.scarabuff") version "0.2.0"
+}
+```
+
+**2. Add the runtime dependencies.** scarabuff only generates code; the libraries it compiles
+against are up to you:
+
+```kotlin
+dependencies {
+    implementation("com.google.flatbuffers:flatbuffers-java:25.2.10")
+    implementation("com.google.flatbuffers:flatbuffers-java-grpc:2.0.3")
+    implementation("io.grpc:grpc-stub:1.70.0")
+    implementation("io.grpc:grpc-kotlin-stub:1.2.1")
+    implementation("io.grpc:grpc-netty:1.70.0") // or any other gRPC transport
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
+}
+```
+
+These are the versions scarabuff is tested with (see `example/build.gradle.kts`).
+
+**3. Install `flatc` at the same version as `flatbuffers-java`** (25.2.10 above). See
+[Getting the right `flatc`](#getting-the-right-flatc) below; this is the one step that's easy to
+get wrong.
+
+**4. Put your schemas in `src/main/fbs/`:**
+
+```fbs
+namespace com.example.echo;
+
+table EchoRequest { message:string; }
+table EchoResponse { message:string; }
+
+rpc_service EchoService {
+  Echo(EchoRequest):EchoResponse;                                  // unary
+  Observe(EchoRequest):EchoResponse (streaming: "server");
+  Collect(EchoRequest):EchoResponse (streaming: "client");
+  Chat(EchoRequest):EchoResponse (streaming: "bidi");
+}
+```
+
+`generateScarabuffSources` runs automatically before `compileKotlin`, so a normal build generates
+the table classes and an `EchoServiceGrpcKt` object next to them.
+
+**5. Implement the server and call it from a client:**
+
+```kotlin
+import com.example.echo.EchoServiceGrpcKt.EchoServiceCoroutineImplBase
+import com.example.echo.EchoServiceGrpcKt.EchoServiceCoroutineStub
+
+// Server: override the RPCs you implement; the rest answer UNIMPLEMENTED.
+class EchoServer : EchoServiceCoroutineImplBase() {
+    override suspend fun echo(echoRequest: EchoRequest): EchoResponse = /* build a response */
+    override fun observe(echoRequest: EchoRequest): Flow<EchoResponse> = /* ... */
+    override suspend fun collect(echoRequest: Flow<EchoRequest>): EchoResponse = /* ... */
+    override fun chat(echoRequest: Flow<EchoRequest>): Flow<EchoResponse> = /* ... */
+}
+// ServerBuilder.forPort(8080).addService(EchoServer()).build().start()
+
+// Client
+val stub = EchoServiceCoroutineStub(channel)
+val response: EchoResponse = stub.echo(request)
+val stream: Flow<EchoResponse> = stub.observe(request)
+```
+
+Requests and responses are ordinary FlatBuffers tables, built with `FlatBufferBuilder` as usual.
+[`EchoRoundTripTest.kt`](example/src/test/kotlin/com/scarabuff/example/EchoRoundTripTest.kt) has
+a complete, runnable version of all four shapes, including the builder code.
+
+## Getting the right `flatc`
+
+`flatc`'s version and the `flatbuffers-java` / `flatbuffers-java-grpc` runtime jars **must
+match**. FlatBuffers releases `flatc` and every language runtime together under one version
+number, and a newer `flatc` happily emits code the older runtime can't load (for example a
+`Constants.FLATBUFFERS_25_12_19()` version check that doesn't exist in the `25.2.10` jar, which
+fails at compile time).
+
+- **Download the release binary**: grab `flatc` for your platform from the
+  [FlatBuffers v25.2.10 release](https://github.com/google/flatbuffers/releases/tag/v25.2.10)
+  (`Mac.flatc.binary.zip`, `Linux.flatc.binary.g++-13.zip` or `Windows.flatc.binary.zip`).
+- **Or use Nix**: `nix run github:microgeant/scarabuff#flatc -- --version`, or
+  `nix develop github:microgeant/scarabuff` for a shell with it on `$PATH` and `$FLATC` set.
+- **Avoid `brew install flatbuffers`** and other package managers unless you've checked the
+  version: they install the latest `flatc`, which usually won't match your runtime jars.
+
+The plugin looks for `flatc` in this order: the `flatc` setting below, the `$FLATC` environment
+variable, then `flatc` on `$PATH`. Run `flatc --version` to check which one you have.
+
+## Configuration
+
+All settings are optional:
+
+```kotlin
+scarabuff {
+    schemaDir.set(layout.projectDirectory.dir("src/main/fbs"))
+    outputDir.set(layout.buildDirectory.dir("generated/source/scarabuff"))
+    flatc.set("/opt/flatbuffers-25.2.10/flatc")
+    kotlinPackageSuffix.set(".grpc")
+}
+```
+
+| Setting | Default | Description |
+|---|---|---|
+| `schemaDir` | `src/main/fbs` | Directory containing the `.fbs` schemas. |
+| `outputDir` | `build/generated/source/scarabuff` | Where generated Kotlin goes; added to the `main` source set automatically. |
+| `flatc` | `$FLATC`, then `flatc` on `$PATH` | Path to, or name of, the `flatc` executable. |
+| `kotlinPackageSuffix` | `""` | Appended to each schema's `namespace` to form the package for the generated `<Service>GrpcKt`. Empty puts it next to the table classes; e.g. `.grpc` puts it in a subpackage. |
+
+The `org.jetbrains.kotlin.jvm` plugin must also be applied; the order doesn't matter.
+
+### Using an unreleased checkout
+
+To try changes that aren't published yet, consume scarabuff as a composite build (this is what
+`example/` does) and drop the `version` from the `plugins {}` block:
+
+```kotlin
+// settings.gradle.kts
+pluginManagement {
+    includeBuild("../path/to/scarabuff")
+}
+```
+
+## Using the CLI
+
+For non-Gradle builds, build the CLI from source and point it at the same kind of schema
+directory:
+
+```
+./gradlew :scarabuff-cli:installDist
+scarabuff-cli/build/install/scarabuff-cli/bin/scarabuff-cli \
+  --schema-dir path/to/fbs \
+  --out-dir build/generated \
+  --flatc "$FLATC"
+```
+
+## How it works
+
+### Project layout
 
 - **`scarabuff-core`** — the actual logic, as a plain JVM library with no Gradle API dependency:
   a text parser for `rpc_service` blocks (`FbsRpcParser`), a [KotlinPoet](https://square.github.io/kotlinpoet/)-based
@@ -56,7 +201,7 @@ rpc_service ClipAudioService {
   gRPC server and client using the generated stubs and asserts real round-trip responses for all
   four RPC kinds. This is the thing to run if you want proof it actually works, not just compiles.
 
-## Why it's pure Kotlin
+### Why it's pure Kotlin
 
 flatc's `--grpc` flag has no Kotlin implementation — running `flatc --kotlin --grpc` prints
 `GRPC interface generator not implemented for Kotlin` and silently emits only the table classes,
@@ -74,130 +219,26 @@ runtime jar, still a regular dependency — not generated code) is generic over 
 subclass. So `Orchestrator` runs `flatc --kotlin` (no `--java`, no `--grpc`) and the entire
 generated output — table classes and gRPC wrapper alike — is Kotlin.
 
-## Version pinning
-
-`flatc`'s compiler version and the `flatbuffers-java`/`flatbuffers-java-grpc` runtime jars **must
-match** — FlatBuffers releases `flatc` and every language runtime together under one version
-number, and a newer `flatc` will happily emit code the older runtime can't load (e.g. a
-`Constants.FLATBUFFERS_25_12_19()` version-check call that doesn't exist in a `25.2.10` runtime
-jar — this is a real failure this project hit and worked around during development).
-
-- **JVM dependency versions** (grpc, grpc-kotlin, flatbuffers-java, kotlinx-coroutines, kotlin,
-  kotlinpoet) are pinned in [`gradle/libs.versions.toml`](gradle/libs.versions.toml).
-- **`flatc` itself** is pinned by [`flake.nix`](flake.nix): `nix develop` drops you into a shell
-  with `flatc` built from the FlatBuffers `v25.2.10` GitHub release binaries (exact version match
-  to the `flatbuffers-java` in the version catalog) on `$PATH`, with `$FLATC` exported. The
-  Gradle plugin's `flatc` property defaults to `$FLATC`, falling back to `flatc` on `$PATH` when
-  not running inside the devShell — so the pin only "takes" inside `nix develop`; outside it,
-  you're on whatever `flatc` you have installed, which is exactly the hazard above.
-- To bump versions: change `flatcVersion` in `flake.nix` (and its per-system asset hashes — see
-  the comment there) together with `flatbuffersJava`/`flatbuffersJavaGrpc` in
-  `gradle/libs.versions.toml`, in the same commit.
-
-`flake.nix` has been verified end-to-end: `nix flake check` passes, `nix build .#flatc` produces
-a working `flatc version 25.2.10`, and `nix develop -c bash -c 'cd example && ./gradlew test'`
-runs all four round-trip tests green with no manual `$FLATC` override. `flake.lock` pins the
-exact `nixpkgs` revision that was verified against.
-
-## Using the Gradle plugin
-
-The plugin is published to the [Gradle Plugin Portal](https://plugins.gradle.org/plugin/io.github.microgeant.scarabuff)
-as `io.github.microgeant.scarabuff`, so no extra repository configuration is needed:
-
-```kotlin
-// build.gradle.kts
-plugins {
-    kotlin("jvm")
-    id("io.github.microgeant.scarabuff") version "0.2.0"
-}
-
-scarabuff {
-    // schemaDir defaults to src/main/fbs, outputDir to build/generated/source/scarabuff
-    // flatc defaults to $FLATC (set by `nix develop`), then `flatc` on PATH
-    // kotlinPackageSuffix defaults to "" (coroutine wrapper colocated with the flatc Kotlin output)
-}
-```
-
-`generateScarabuffSources` then runs automatically before `compileKotlin`. You
-still need the runtime dependencies yourself (`com.google.flatbuffers:flatbuffers-java`,
-`:flatbuffers-java-grpc`, `io.grpc:grpc-stub`, `io.grpc:grpc-kotlin-stub`, a gRPC transport like
-`io.grpc:grpc-netty`, `org.jetbrains.kotlinx:kotlinx-coroutines-core`) — see
-`example/build.gradle.kts` for a complete, working set at the pinned versions.
-
-To use an unreleased checkout instead, consume it as a composite build (this is what `example/`
-does) and drop the `version` from the `plugins {}` block:
-
-```kotlin
-// settings.gradle.kts
-pluginManagement {
-    includeBuild("../path/to/scarabuff")
-}
-```
-
-## Releasing
-
-Publishing is done by [`.github/workflows/publish.yml`](.github/workflows/publish.yml):
-
-1. One-time: create API keys at <https://plugins.gradle.org> and add them as the GitHub repo
-   secrets `GRADLE_PUBLISH_KEY` / `GRADLE_PUBLISH_SECRET`.
-2. Bump `version` in `gradle.properties`, commit, then tag and push: `git tag v0.2.0 && git push
-   origin v0.2.0`. The workflow checks the tag matches the version, runs the build and the
-   example's round-trip tests inside `nix develop`, then runs `publishPlugins`.
-
-`scarabuff-core` isn't published separately: it's bundled into the plugin jar via the shadow
-plugin, with its own dependencies (KotlinPoet) left as normal POM dependencies. To publish by
-hand instead, run `./gradlew :scarabuff-gradle-plugin:publishPlugins` with the keys set in
-`~/.gradle/gradle.properties` as `gradle.publish.key` / `gradle.publish.secret`.
-
-## Using the CLI
-
-```
-./gradlew :scarabuff-cli:installDist
-scarabuff-cli/build/install/scarabuff-cli/bin/scarabuff-cli \
-  --schema-dir path/to/fbs \
-  --out-dir build/generated \
-  --flatc "$FLATC"
-```
-
 ## Development
 
 ```
-nix develop            # flatc (pinned), JDK 17, Gradle on PATH, $FLATC exported
-./gradlew build         # scarabuff-core, scarabuff-gradle-plugin, scarabuff-cli
+nix develop                    # pinned flatc, JDK 17 and Gradle on PATH, $FLATC exported
+./gradlew build                # scarabuff-core, scarabuff-gradle-plugin, scarabuff-cli
 cd example && ./gradlew test   # end-to-end round-trip proof, all 4 streaming kinds
 ```
 
-### Other flake commands
+Or run a single command without entering the shell: `nix develop -c ./gradlew build`.
 
-`flake.nix` exposes two outputs per supported system (`x86_64-linux`, `x86_64-darwin`,
-`aarch64-darwin` — see the comment in `flake.nix` for why `aarch64-linux` is intentionally
-excluded): `packages.<system>.flatc` (aliased as `packages.<system>.default`) and
-`devShells.<system>.default`. A few ways to use them beyond `nix develop`:
+### Version pinning
 
-```
-# Run a single command inside the devShell without dropping into it interactively
-nix develop -c ./gradlew build
-nix develop -c bash -c 'cd example && ./gradlew test'
-
-# Build just the pinned flatc derivation, without JDK/Gradle
-nix build .#flatc          # or `nix build` — flatc is the default package
-result/bin/flatc --version
-
-# Run the pinned flatc directly, without a `nix build` step first
-nix run .#flatc -- --version
-
-# List everything the flake exposes (packages, devShells, etc.)
-nix flake show
-
-# Validate the flake evaluates and builds cleanly on the current system
-nix flake check
-
-# Update the pinned nixpkgs revision (rewrites flake.lock)
-nix flake update
-```
-
-Every command above is reproducible off `flake.lock` — no `nix-channel`/`NIX_PATH` involved, and
-no dependency on whatever `flatc`/JDK/Gradle happen to already be on your machine.
+- **JVM dependency versions** (grpc, grpc-kotlin, flatbuffers-java, kotlinx-coroutines, kotlin,
+  kotlinpoet) are pinned in [`gradle/libs.versions.toml`](gradle/libs.versions.toml).
+- **`flatc`** is pinned by [`flake.nix`](flake.nix) to the FlatBuffers `v25.2.10` release
+  binaries, for `x86_64-linux`, `x86_64-darwin` and `aarch64-darwin` (there's no official
+  `aarch64-linux` binary for that release). `flake.lock` pins the `nixpkgs` revision.
+- To bump FlatBuffers: change `flatcVersion` in `flake.nix` (and its per-system asset hashes, see
+  the comment there) together with `flatbuffersJava`/`flatbuffersJavaGrpc` in
+  `gradle/libs.versions.toml`, in the same commit.
 
 ## License
 
