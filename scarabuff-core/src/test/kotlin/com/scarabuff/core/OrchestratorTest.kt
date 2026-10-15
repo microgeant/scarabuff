@@ -164,8 +164,10 @@ class OrchestratorTest {
 
         assertThat(result.generatedKotlinFiles.map { it.name })
             .containsExactly("Vec2Builders.kt", "UserBuilders.kt", "PostBuilders.kt")
-        val user = generated("com.probe.msgs.UserBuilders")
-        assertThat(user).contains("fun User.Companion.build(id: UInt = 0u, name: String): User")
+        val user = generated("com.probe.msgs.UserBuilders").replace(Regex("""\s+"""), " ")
+        assertThat(user).contains(
+            "fun User.Companion.build( id: UInt = 0u, name: String, builder: FlatBufferBuilder = FlatBufferBuilder(), ): User"
+        )
         assertThat(user).contains("fun User.Companion.fromBytes(bytes: ByteArray): User")
         val vec2 = generated("com.probe.msgs.Vec2Builders")
         assertThat(vec2).contains("fun Vec2.Companion.build(x: Float, y: Float): Vec2")
@@ -220,5 +222,45 @@ class OrchestratorTest {
         val result = Orchestrator.generate(schemaDir, outputDir, flatc, generateBuilders = false)
 
         assertThat(result.generatedKotlinFiles).isEmpty()
+    }
+
+    @Test
+    fun `a table nesting one without builders gets none either`() {
+        schema(
+            "n.fbs",
+            """
+            namespace com.probe.n;
+            table A { x:int; }
+            union Payload { A }
+            table WithUnion { payload:Payload; }
+            table Holder { held:WithUnion; }
+            table Outer { holders:[Holder]; }
+            """,
+        )
+
+        val result = generate()
+
+        assertThat(result.tablesWithoutBuilders).containsExactly(
+            "com.probe.n.WithUnion", "union field `payload`",
+            "com.probe.n.Holder", "field `held` holding `com.probe.n.WithUnion`, which has no builders",
+            "com.probe.n.Outer", "field `holders` holding `com.probe.n.Holder`, which has no builders",
+        )
+        assertThat(generated("com.probe.n.ABuilders")).contains("data class ASpec")
+    }
+
+    @Test
+    fun `a schema that already declares a Spec type fails clearly`() {
+        schema(
+            "c.fbs",
+            """
+            namespace com.probe.c;
+            table User { x:int; }
+            table UserSpec { y:int; }
+            """,
+        )
+
+        val e = assertThrows<IllegalArgumentException> { generate() }
+
+        assertThat(e).hasMessageThat().contains("already declares `com.probe.c.UserSpec`")
     }
 }

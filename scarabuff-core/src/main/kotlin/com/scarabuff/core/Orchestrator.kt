@@ -1,9 +1,12 @@
 package com.scarabuff.core
 
+import com.scarabuff.core.codegen.FieldAccessGenerator
 import com.scarabuff.core.codegen.GrpcCoroutineGenerator
 import com.scarabuff.core.codegen.StructBuilderGenerator
 import com.scarabuff.core.codegen.TableBuilderGenerator
 import com.scarabuff.core.fbs.BfbsReader
+import com.scarabuff.core.fbs.FbsTypeName
+import com.scarabuff.core.fbs.FieldKind
 import com.scarabuff.core.fbs.RpcServiceDef
 import com.scarabuff.core.fbs.StructDef
 import com.scarabuff.core.fbs.TableDef
@@ -79,17 +82,64 @@ object Orchestrator {
         }
         val tablesWithoutBuilders = mutableMapOf<String, String>()
         if (generateBuilders) {
+            checkSpecNames(schema)
             val structs = schema.structs.associateBy { it.type }
             for (struct in schema.structs) {
                 write(StructBuilderGenerator.generate(struct, structs))
             }
-            for (table in schema.tables) {
-                write(TableBuilderGenerator.generate(table))
+            val fieldAccess = FieldAccessGenerator.className(schema.tables.map { it.type.packageName }.distinct())
+            val tables = withUnsupportedNesting(schema.tables, structs.keys)
+            // Only the string helpers of optional fields need it.
+            if (tables.any { table -> table.fields.any { it.kind == FieldKind.Str && !it.required } }) {
+                write(FieldAccessGenerator.generate(fieldAccess))
+            }
+            for (table in tables) {
+                write(TableBuilderGenerator.generate(table, fieldAccess))
                 table.unsupportedReason?.let { tablesWithoutBuilders["${table.type.packageName}.${table.type.simpleName}"] = it }
             }
         }
 
         return ScarabuffResult(outputDir, generatedFiles, tablesWithoutBuilders)
+    }
+
+    /**
+     * A table can only have builders if every table it nests has them too (its builder takes their
+     * specs), so mark tables that nest an unsupported one, repeating until nothing changes.
+     * Tables and structs from includes outside the schema directory have no specs either.
+     */
+    private fun withUnsupportedNesting(tables: List<TableDef>, structs: Set<FbsTypeName>): List<TableDef> {
+        var current = tables
+        while (true) {
+            val supported = current.filter { it.unsupportedReason == null }.map { it.type }.toSet()
+            var changed = false
+            current = current.map { table ->
+                if (table.unsupportedReason != null) return@map table
+                val blocker = table.fields.firstNotNullOfOrNull { field ->
+                    val nested = when (val kind = field.kind) {
+                        is FieldKind.Table -> kind.type.takeIf { it !in supported }
+                        is FieldKind.TableVector -> kind.element.takeIf { it !in supported }
+                        is FieldKind.Struct -> kind.type.takeIf { it !in structs }
+                        is FieldKind.StructVector -> kind.element.takeIf { it !in structs }
+                        else -> null
+                    }
+                    nested?.let { "field `${field.name}` holding `${it.packageName}.${it.simpleName}`, which has no builders" }
+                }
+                if (blocker == null) table else table.copy(unsupportedReason = blocker).also { changed = true }
+            }
+            if (!changed) return current
+        }
+    }
+
+    /** Builders add a `<Name>Spec` class per table and struct; fail clearly if the schema already has one. */
+    private fun checkSpecNames(schema: Schema) {
+        val declared = (schema.tables.map { it.type } + schema.structs.map { it.type }).toSet()
+        for (type in declared) {
+            val spec = FbsTypeName(type.packageName, "${type.simpleName}Spec")
+            require(spec !in declared) {
+                "scarabuff generates a class `${spec.simpleName}` for `${type.simpleName}`, but the schema already " +
+                    "declares `${spec.packageName}.${spec.simpleName}`. Rename one of them, or set generateBuilders to false."
+            }
+        }
     }
 
     private class Schema(val services: List<RpcServiceDef>, val tables: List<TableDef>, val structs: List<StructDef>)

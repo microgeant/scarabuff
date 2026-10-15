@@ -70,3 +70,31 @@ table Strict {
 
 root_type Strict;
 file_identifier "STRT";
+
+// Line wrapping: KotlinPoet wraps long generated lines, and a break before a lambda's `{` doesn't
+// compile. NumPayload is the schema from the 0.4.0 bug report; the long names move the wrap point
+// across the other lambda-emitting field kinds and the gRPC stub.
+struct NumItem { id:long; score:double; active:bool; }
+table NumPayload { id:long; items:[NumItem]; }
+
+table AVeryLongTableNameThatPushesGeneratedLinesPastTheWrapLimit {
+  a_rather_long_vector_of_structs_field_name:[NumItem];
+  another_rather_long_vector_of_strings_field:[string];
+  yet_another_long_vector_of_nested_tables:[Inner];
+  an_optional_scalar_with_a_long_field_name:int = null;
+  an_optional_struct_with_a_long_field_name:NumItem;
+}
+
+rpc_service AVeryLongServiceNameThatPushesGeneratedLinesPastTheWrapLimit {
+  AVeryLongMethodNameForTheUnaryCase(AVeryLongTableNameThatPushesGeneratedLinesPastTheWrapLimit):NumPayload;
+  AVeryLongMethodNameForTheBidiCase(AVeryLongTableNameThatPushesGeneratedLinesPastTheWrapLimit):NumPayload (streaming: "bidi");
+}
+
+// An empty table: its spec is a plain class, since a data class needs a property.
+table Empty {}
+
+// A union field means no builders for WithUnion, and so none for HoldsUnion, which nests it
+// (its builder would take a WithUnionSpec that doesn't exist).
+union Payload { Inner }
+table WithUnion { payload:Payload; }
+table HoldsUnion { held:WithUnion; }

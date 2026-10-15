@@ -94,7 +94,7 @@ class ScarabuffPluginFunctionalTest {
         assertThat(first.task(":test")?.outcome).isEqualTo(TaskOutcome.SUCCESS)
         // Make sure the fixture's own tests actually ran, not just that the task succeeded.
         assertThat(testCount("com.scarabuff.example.EchoRoundTripTest")).isEqualTo(5)
-        assertThat(testCount("com.probe.builders.BuildersTest")).isEqualTo(7)
+        assertThat(testCount("com.probe.builders.BuildersTest")).isEqualTo(14)
 
         val second = runner(gradleVersion, "test", "--configuration-cache").build()
         assertThat(second.output).contains("Configuration cache entry reused")
