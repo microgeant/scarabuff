@@ -34,6 +34,9 @@ class TableBuilderGeneratorTest {
 
     private fun generate(table: TableDef) = TableBuilderGenerator.generate(table).toString()
 
+    /** The generated code with all whitespace runs collapsed, so assertions don't depend on line wrapping. */
+    private fun generateFlat(table: TableDef) = generate(table).replace(Regex("""\s+"""), " ")
+
     @Test
     fun `snake_case fields use flatc's camelCase names`() {
         val code = generate(table(field("created_at", FieldKind.Scalar(ScalarType.LONG))))
@@ -60,9 +63,9 @@ class TableBuilderGeneratorTest {
 
     @Test
     fun `required fields are non-null parameters without defaults`() {
-        val code = generate(table(field("name", FieldKind.Str, required = true)))
+        val code = generateFlat(table(field("name", FieldKind.Str, required = true)))
 
-        assertThat(code).contains("fun Msg.Companion.build(name: String): Msg")
+        assertThat(code).contains("fun Msg.Companion.build(name: String, builder: FlatBufferBuilder = FlatBufferBuilder()): Msg")
         assertThat(code).contains("val o_name = name.let { builder.createString(it) }")
         assertThat(code).contains("Msg.addName(builder, o_name)")
     }
@@ -86,11 +89,15 @@ class TableBuilderGeneratorTest {
     }
 
     @Test
-    fun `nested tables from another namespace import that namespace's copyInto`() {
+    fun `nested tables are specs, written into the same builder`() {
         val code = generate(table(field("author", FieldKind.Table(FbsTypeName("com.other", "User")))))
 
-        assertThat(code).contains("import com.other.copyInto")
-        assertThat(code).contains("val o_author = author?.let { it.copyInto(builder) }")
+        assertThat(code).contains("author: UserSpec? = null")
+        assertThat(code).contains("import com.other.UserSpec")
+        assertThat(code).contains("val o_author = author?.let { it.writeTo(builder) }")
+        // Reading a received message back into a spec uses the nested table's toSpec.
+        assertThat(code).contains("import com.other.toSpec")
+        assertThat(code).contains("author = this.author?.toSpec()")
     }
 
     @Test
@@ -127,22 +134,92 @@ class TableBuilderGeneratorTest {
             )
         )
 
-        assertThat(code).contains("origin: Vec2? = null")
-        assertThat(code).contains("pose: Pose,")
-        assertThat(code).contains("origin?.let { Msg.addOrigin(builder, it.copyInto(builder)) }")
-        assertThat(code).contains("Msg.addPose(builder, pose.copyInto(builder))")
+        assertThat(code).contains("origin: Vec2Spec? = null")
+        assertThat(code).contains("pose: PoseSpec,")
+        assertThat(code).contains("origin?.let { Msg.addOrigin(builder, it.writeTo(builder)) }")
+        assertThat(code).contains("Msg.addPose(builder, pose.writeTo(builder))")
         // Nothing for structs is written before the table starts.
-        assertThat(code.substringBefore("Msg.startMsg(builder)")).doesNotContain("copyInto")
+        val pack = code.substringAfter("fun Msg.Companion.pack(")
+        assertThat(pack.substringBefore("Msg.startMsg(builder)")).doesNotContain("writeTo")
     }
 
     @Test
     fun `vectors of structs are written last-first between start and end vector`() {
-        val code = generate(table(field("path", FieldKind.StructVector(FbsTypeName(pkg, "Vec2")))))
+        val code = generateFlat(table(field("path", FieldKind.StructVector(FbsTypeName(pkg, "Vec2")))))
+
+        assertThat(code).contains("path: List<Vec2Spec>? = null")
+        assertThat(code).contains("Msg.startPathVector(builder, it.size);")
+        assertThat(code).contains("it.asReversed().forEach { s -> s.writeTo(builder) }")
+        assertThat(code).contains("builder.endVector()")
+        assertThat(code).contains("List(this.pathLength) { this.path(it)!!.toSpec() }")
+    }
+
+    @Test
+    fun `every table gets a spec data class mirroring its fields`() {
+        val code = generateFlat(
+            table(
+                field("name", FieldKind.Str, required = true),
+                field("count", FieldKind.Scalar(ScalarType.INT), defaultValue = "3"),
+            )
+        )
+
+        assertThat(code).contains("public data class MsgSpec( public val name: String, public val count: Int = 3, )")
+        assertThat(code).contains("public fun writeTo(builder: FlatBufferBuilder): Int = Msg.pack(builder, name = name, count = count)")
+        assertThat(code).contains("public fun Msg.toSpec(): MsgSpec")
+        assertThat(code).contains("public fun Msg.copyInto(builder: FlatBufferBuilder): Int = toSpec().writeTo(builder)")
+    }
+
+    @Test
+    fun `a table without fields gets a plain spec class`() {
+        val code = generate(table())
+
+        assertThat(code).contains("public class MsgSpec")
+        assertThat(code).doesNotContain("data class")
+        assertThat(code).contains("override fun equals(other: Any?): Boolean = other is MsgSpec")
+        assertThat(code).contains("Msg.pack(builder)")
+    }
+
+    @Test
+    fun `build and buildBytes take an optional builder, cleared first`() {
+        val code = generateFlat(table(field("x", FieldKind.Scalar(ScalarType.INT))))
 
         assertThat(code).contains(
-            "Msg.startPathVector(builder, it.size); it.asReversed().forEach { s ->"
+            "fun Msg.Companion.buildBytes(x: Int = 0, builder: FlatBufferBuilder = FlatBufferBuilder()): ByteArray { builder.clear()"
         )
-        assertThat(code).contains("builder.endVector()")
-        assertThat(code).contains("List(this.pathLength) { this.path(it)!! }")
+        assertThat(code).contains("fun Msg.Companion.build(x: Int = 0, builder: FlatBufferBuilder = FlatBufferBuilder()): Msg { builder.clear()")
+        // The spec forwards its builder.
+        assertThat(code).contains("public fun buildBytes(builder: FlatBufferBuilder = FlatBufferBuilder()): ByteArray = Msg.buildBytes(x = x, builder = builder)")
+    }
+
+    @Test
+    fun `string fields get an equals helper that doesn't decode`() {
+        val access = FieldAccessGenerator.className(listOf(pkg))
+        val code = TableBuilderGenerator.generate(
+            table(
+                field("title", FieldKind.Str, id = 2),
+                field("name", FieldKind.Str, id = 3, required = true),
+            ),
+            access,
+        ).toString().replace(Regex("""\s+"""), " ")
+
+        // Optional: a presence check first, since flatc's titleAsByteBuffer throws when it's absent.
+        assertThat(code).contains("public fun Msg.titleEquals(`value`: String?): Boolean {")
+        assertThat(code).contains("if (!${access.simpleName}.isPresent(this, 8)) return value == null")
+        assertThat(code).contains("return value != null && scarabuffUtf8Equals(titleAsByteBuffer, value)")
+        // Required: always present.
+        assertThat(code).contains("public fun Msg.nameEquals(`value`: String?): Boolean = value != null && scarabuffUtf8Equals(nameAsByteBuffer, value)")
+        assertThat(code).contains("private fun scarabuffUtf8Equals(bytes: ByteBuffer, `value`: String): Boolean")
+    }
+
+    @Test
+    fun `the field access object lives in flatbuffers' package and is internal`() {
+        val access = FieldAccessGenerator.className(listOf("com.b", "com.a"))
+        val code = FieldAccessGenerator.generate(access).toString()
+
+        assertThat(access.packageName).isEqualTo("com.google.flatbuffers")
+        assertThat(access).isEqualTo(FieldAccessGenerator.className(listOf("com.a", "com.b")))
+        assertThat(access).isNotEqualTo(FieldAccessGenerator.className(listOf("com.c")))
+        assertThat(code).contains("internal object ${access.simpleName}")
+        assertThat(code).contains("table.__offset(vtableOffset) != 0")
     }
 }

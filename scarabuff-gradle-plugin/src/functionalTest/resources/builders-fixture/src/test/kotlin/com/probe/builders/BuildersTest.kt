@@ -2,9 +2,8 @@ package com.probe.builders
 
 import com.google.common.truth.Truth.assertThat
 import com.google.flatbuffers.FlatBufferBuilder
-import com.probe.common.Point
-import com.probe.common.Shared
-import com.probe.common.build
+import com.probe.common.PointSpec
+import com.probe.common.SharedSpec
 import java.nio.ByteBuffer
 import org.junit.jupiter.api.Test
 
@@ -43,13 +42,13 @@ class BuildersTest {
             aInt = -7, aUint = 4000000000u, aLong = Long.MIN_VALUE, aUlong = 1uL,
             aFloat = 0.25f, aDouble = -1e300, color = Color.Red, level = Level.Low,
             someText = "hello",
-            inner = Inner.build(v = 5, label = "nested"),
-            otherNs = Shared.build(note = "other namespace"),
+            inner = InnerSpec(v = 5, label = "nested"),
+            otherNs = SharedSpec(note = "other namespace"),
             vBool = listOf(true, false), vByte = listOf(-1, 2), vUbyte = listOf(255u, 0u),
             vShort = listOf(-2, 3), vUshort = listOf(65535u), vInt = listOf(1, 2, 3), vUint = listOf(7u),
             vLong = listOf(Long.MAX_VALUE), vUlong = listOf(ULong.MAX_VALUE), vFloat = listOf(1.5f),
             vDouble = listOf(2.5, 3.5), vColor = listOf(Color.Green, Color.Red),
-            vString = listOf("a", "b"), vInner = listOf(Inner.build(v = 1), Inner.build(v = 2)),
+            vString = listOf("a", "b"), vInner = listOf(InnerSpec(v = 1), InnerSpec(v = 2)),
             optInt = 0,
             object_ = 11, when_ = listOf("keyword"),
         )
@@ -90,7 +89,7 @@ class BuildersTest {
 
     @Test
     fun `copyInto re-serializes a received message`() {
-        val original = All.fromBytes(All.buildBytes(someText = "copy", vInt = listOf(4, 5), inner = Inner.build(v = 3)))
+        val original = All.fromBytes(All.buildBytes(someText = "copy", vInt = listOf(4, 5), inner = InnerSpec(v = 3)))
 
         val builder = FlatBufferBuilder()
         builder.finish(original.copyInto(builder))
@@ -104,7 +103,7 @@ class BuildersTest {
 
     @Test
     fun `required fields are parameters without defaults, and the root gets its file identifier`() {
-        val bytes = Strict.buildBytes(name = "strict", inner = Inner.build(v = 1), ids = listOf(9))
+        val bytes = Strict.buildBytes(name = "strict", inner = InnerSpec(v = 1), ids = listOf(9))
 
         assertThat(Strict.StrictBufferHasIdentifier(ByteBuffer.wrap(bytes))).isTrue()
         val strict = Strict.fromBytes(bytes)
@@ -118,16 +117,16 @@ class BuildersTest {
 
     @Test
     fun `structs build standalone and round-trip inside tables`() {
-        val origin = Vec2.build(x = 1.5f, y = -2f)
+        val origin = Vec2Spec(x = 1.5f, y = -2f)
         assertThat(origin.x).isEqualTo(1.5f)
         assertThat(origin.y).isEqualTo(-2f)
 
         val shapes = Shapes.build(
             origin = origin,
-            pose = Pose.build(position = Vec2.build(x = 3f, y = 4f), angle = 0.5, color = Color.Green, visible = true),
-            path = listOf(Vec2.build(0f, 0f), Vec2.build(1f, 1f), Vec2.build(2f, 4f)),
-            otherNs = Point.build(x = 7, y = 8),
-            bounds = Bounds.build(in_ = 10, is_ = 20),
+            pose = PoseSpec(position = Vec2Spec(x = 3f, y = 4f), angle = 0.5, color = Color.Green, visible = true),
+            path = listOf(Vec2Spec(0f, 0f), Vec2Spec(1f, 1f), Vec2Spec(2f, 4f)),
+            otherNs = PointSpec(x = 7, y = 8),
+            bounds = BoundsSpec(in_ = 10, is_ = 20),
         )
 
         assertThat(shapes.origin!!.x).isEqualTo(1.5f)
@@ -143,14 +142,14 @@ class BuildersTest {
 
     @Test
     fun `optional struct fields stay absent, and copyInto keeps structs`() {
-        val minimal = Shapes.build(pose = Pose.build(Vec2.build(0f, 0f), angle = 1.0, color = Color.Red, visible = false))
+        val minimal = Shapes.build(pose = PoseSpec(Vec2Spec(0f, 0f), angle = 1.0, color = Color.Red, visible = false))
         assertThat(minimal.origin).isNull()
         assertThat(minimal.pathLength).isEqualTo(0)
 
         val original = Shapes.fromBytes(
             Shapes.buildBytes(
-                pose = Pose.build(Vec2.build(5f, 6f), angle = 2.0, color = Color.Green, visible = true),
-                path = listOf(Vec2.build(9f, 9f)),
+                pose = PoseSpec(Vec2Spec(5f, 6f), angle = 2.0, color = Color.Green, visible = true),
+                path = listOf(Vec2Spec(9f, 9f)),
             )
         )
         val builder = FlatBufferBuilder()
@@ -161,5 +160,116 @@ class BuildersTest {
         assertThat(copy.pose.visible).isTrue()
         assertThat(copy.path(0)!!.x).isEqualTo(9f)
         assertThat(copy.origin).isNull()
+    }
+
+    @Test
+    fun `the 0_4_0 bug report's struct vector schema compiles and round-trips`() {
+        val payload = NumPayload.build(
+            id = 9L,
+            items = listOf(NumItemSpec(id = 1L, score = 0.5, active = true), NumItemSpec(id = 2L, score = 1.5, active = false)),
+        )
+
+        assertThat(List(payload.itemsLength) { payload.items(it)!!.id }).containsExactly(1L, 2L).inOrder()
+        assertThat(payload.items(1)!!.active).isFalse()
+
+        val long = AVeryLongTableNameThatPushesGeneratedLinesPastTheWrapLimit.build(
+            aRatherLongVectorOfStructsFieldName = listOf(NumItemSpec(3L, 2.5, true)),
+            anotherRatherLongVectorOfStringsField = listOf("wrapped"),
+            anOptionalScalarWithALongFieldName = 0,
+        )
+        assertThat(long.aRatherLongVectorOfStructsFieldName(0)!!.score).isEqualTo(2.5)
+        assertThat(long.anotherRatherLongVectorOfStringsField(0)).isEqualTo("wrapped")
+        assertThat(long.anOptionalScalarWithALongFieldName).isEqualTo(0)
+    }
+
+    @Test
+    fun `specs are data classes that round-trip through toSpec`() {
+        val spec = AllSpec(
+            someText = "spec",
+            inner = InnerSpec(v = 4, label = "in"),
+            vInner = listOf(InnerSpec(v = 1)),
+            vString = listOf("a"),
+            optInt = 0,
+        )
+
+        val message = spec.build()
+        assertThat(message.toSpec()).isEqualTo(spec)
+        assertThat(All.fromBytes(spec.buildBytes()).toSpec()).isEqualTo(spec)
+        assertThat(spec.copy(someText = "changed")).isNotEqualTo(spec)
+
+        val shapes = ShapesSpec(pose = PoseSpec(Vec2Spec(1f, 2f), angle = 3.0, color = Color.Green, visible = true), path = listOf(Vec2Spec(4f, 5f)))
+        assertThat(shapes.build().toSpec()).isEqualTo(shapes)
+        assertThat(shapes.build().pose.toSpec()).isEqualTo(shapes.pose)
+    }
+
+    @Test
+    fun `a whole message tree is written into one builder`() {
+        val builder = FlatBufferBuilder()
+        val offset = AllSpec(inner = InnerSpec(v = 7), vInner = List(3) { InnerSpec(v = it) }).writeTo(builder)
+        builder.finish(offset)
+
+        val all = All.getRootAsAll(builder.dataBuffer())
+        assertThat(all.inner!!.v).isEqualTo(7)
+        assertThat(List(all.vInnerLength) { all.vInner(it)!!.v }).containsExactly(0, 1, 2).inOrder()
+    }
+
+    @Test
+    fun `empty tables get a plain spec class`() {
+        assertThat(EmptySpec()).isEqualTo(EmptySpec())
+        assertThat(EmptySpec().build().toSpec()).isEqualTo(EmptySpec())
+        assertThat(Empty.fromBytes(Empty.buildBytes())).isNotNull()
+    }
+
+    @Suppress("DEPRECATION")
+    @Test
+    fun `the deprecated struct build still works for one release`() {
+        val pose = Pose.build(position = Vec2.build(x = 1f, y = 2f), angle = 0.5, color = Color.Red, visible = true)
+
+        assertThat(pose.toSpec()).isEqualTo(PoseSpec(Vec2Spec(1f, 2f), 0.5, Color.Red, true))
+    }
+
+    @Test
+    fun `a presized or reused builder can be passed in`() {
+        val reused = FlatBufferBuilder(64)
+
+        val first = All.buildBytes(someText = "first", vInt = listOf(1, 2), builder = reused)
+        val second = AllSpec(someText = "second").buildBytes(builder = reused)
+        assertThat(All.fromBytes(first).someText).isEqualTo("first")
+        assertThat(All.fromBytes(first).vIntLength).isEqualTo(2)
+        // Cleared between uses: nothing from the first message leaks into the second.
+        assertThat(All.fromBytes(second).someText).isEqualTo("second")
+        assertThat(All.fromBytes(second).vIntLength).isEqualTo(0)
+
+        val presized = Strict.build(name = "sized", inner = InnerSpec(v = 1), ids = listOf(3), builder = FlatBufferBuilder(128))
+        assertThat(presized.name).isEqualTo("sized")
+        assertThat(Strict.StrictBufferHasIdentifier(presized.byteBuffer)).isTrue()
+    }
+
+    @Test
+    fun `string fields compare without decoding`() {
+        val ascii = All.build(someText = "hello")
+        assertThat(ascii.someTextEquals("hello")).isTrue()
+        assertThat(ascii.someTextEquals("hell")).isFalse()
+        assertThat(ascii.someTextEquals("hello!")).isFalse()
+        assertThat(ascii.someTextEquals("Hello")).isFalse()
+        assertThat(ascii.someTextEquals(null)).isFalse()
+
+        val unicode = All.build(someText = "héllo wörld 🌍")
+        assertThat(unicode.someTextEquals("héllo wörld 🌍")).isTrue()
+        assertThat(unicode.someTextEquals("héllo wörld 🌎")).isFalse()
+        assertThat(unicode.someTextEquals("hello world")).isFalse()
+        assertThat(unicode.someTextEquals("héllo")).isFalse()
+
+        assertThat(All.build(someText = "").someTextEquals("")).isTrue()
+        assertThat(All.build(someText = "").someTextEquals(null)).isFalse()
+
+        // Absent: flatc's own someTextAsByteBuffer throws here; the helper treats it as null.
+        val absent = All.build()
+        assertThat(absent.someTextEquals(null)).isTrue()
+        assertThat(absent.someTextEquals("")).isFalse()
+
+        val strict = Strict.build(name = "required", inner = InnerSpec(v = 1), ids = listOf(1))
+        assertThat(strict.nameEquals("required")).isTrue()
+        assertThat(strict.nameEquals("other")).isFalse()
     }
 }

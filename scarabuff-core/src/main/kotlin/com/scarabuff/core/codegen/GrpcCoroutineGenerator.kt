@@ -132,7 +132,8 @@ object GrpcCoroutineGenerator {
 
     private fun lazyDelegate(body: CodeBlock): CodeBlock =
         CodeBlock.builder()
-            .add("lazy {\n")
+            // `·` is KotlinPoet's non-breaking space: a line break between `lazy` and `{` won't compile.
+            .add("lazy·{\n")
             .indent()
             .add(body)
             .unindent()

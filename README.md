@@ -55,8 +55,8 @@ It's a good fit when FlatBuffers itself is the right choice:
   Android and in games, AR or audio, where a GC pause shows up as stutter.
 - **Binary payloads** such as audio or image buffers, read directly from the received bytes.
 - **A schema shared with native code.** The same `.fbs` works from C++, Rust and Swift.
-- **High-rate streams** of small structured messages, like sensor data or poses, over gRPC
-  streaming with coroutines.
+- **Numeric data as structs,** like sensor readings or poses: decoding a vector of structs is
+  about 11× faster than Protocol Buffers, and allocates almost nothing.
 
 For an ordinary request/response API without those needs, Protocol Buffers with grpc-kotlin is
 usually the simpler choice:
@@ -65,11 +65,13 @@ usually the simpler choice:
   assume Protocol Buffers, and none of them work with FlatBuffers.
 - **Ergonomics:** FlatBuffers messages are read-only views over bytes, with nullable accessors and
   [lifetime rules](#working-with-messages); Protocol Buffers gives you ordinary objects.
-- **Size:** FlatBuffers messages are often larger on the wire, trading compactness for
-  zero-copy reads.
+- **Writes and size:** encoding string-heavy messages is slower than Protocol Buffers, and
+  FlatBuffers messages are larger on the wire, trading compactness for zero-copy reads.
+
+[Performance](#performance) has the measurements behind both lists.
 
 scarabuff's current limits: JVM and Android only, with the schema in a Kotlin/JVM module (see
-[Android](#android)). Generated builders don't support structs or unions yet (see
+[Android](#android)). Generated builders don't support unions yet (see
 [Building messages](#building-messages)).
 
 ## Quick start
@@ -81,7 +83,7 @@ scarabuff's current limits: JVM and Android only, with the schema in a Kotlin/JV
 // build.gradle.kts
 plugins {
     kotlin("jvm") version "2.2.10"
-    id("io.github.microgeant.scarabuff") version "0.4.0"
+    id("io.github.microgeant.scarabuff") version "0.5.0"
 }
 ```
 
@@ -163,35 +165,59 @@ table Post { title:string; author:User; tags:[string]; pin:Vec2; route:[Vec2]; }
 ```kotlin
 val post: Post = Post.build(
     title = "Hello",
-    author = User.build(id = 1u, name = "Ada"), // nested messages are copied in
+    author = UserSpec(id = 1u, name = "Ada"), // nested tables and structs are specs
     tags = listOf("intro", "kotlin"),
-    pin = Vec2.build(x = 1f, y = 2f),           // structs too
-    route = listOf(Vec2.build(0f, 0f), Vec2.build(3f, 4f)),
+    pin = Vec2Spec(x = 1f, y = 2f),
+    route = listOf(Vec2Spec(0f, 0f), Vec2Spec(3f, 4f)),
 )
 
 val bytes: ByteArray = Post.buildBytes(title = "Hello")
 val again: Post = Post.fromBytes(bytes)
 ```
 
+- **Specs:** every table and struct gets a data class, `UserSpec`, `Vec2Spec`, holding it as plain
+  Kotlin values. Nested tables and structs are passed as specs, so a whole message tree is
+  written into one `FlatBufferBuilder`: no buffer per nested message, and structs are written
+  inline with no buffer at all. A spec can also build itself (`spec.build()`,
+  `spec.buildBytes()`, `spec.writeTo(builder)`).
+- **Received messages:** `post.toSpec()` reads a message into its spec, decoding every field. Use
+  it to pass part of a received message into a new one, or as the data class you map to at the
+  network boundary (see [Working with messages](#working-with-messages)).
 - **Parameters** follow the field order and flatc's names (`created_at` becomes `createdAt`).
   Required fields are non-null parameters with no default, so leaving one out is a compile error.
-  Everything else defaults to the schema's default, or `null`.
-- **Lists:** vectors take a `List` (`List<Int>`, `List<String>`, `List<User>`, `List<Vec2>`, ...).
-- **Structs:** `Vec2.build(...)` returns a `Vec2`, the same type flatc's accessors return, so a
-  struct read from one message can be passed straight into another. A struct always has every
-  field, so all of `build`'s parameters are required.
+  Everything else defaults to the schema's default, or `null`. A struct always has every field, so
+  every `Vec2Spec` property is required.
+- **Lists:** vectors take a `List` (`List<Int>`, `List<String>`, `List<UserSpec>`,
+  `List<Vec2Spec>`, ...).
+- **Builder size and reuse:** `build`, `buildBytes` and the spec versions take an optional last
+  argument, `builder`, which is cleared first. By default each call allocates a 1 KB buffer. For
+  small messages, a presized `FlatBufferBuilder(256)` is about 30% faster. Reusing one builder with
+  `buildBytes`, which copies the bytes out, is about 40% faster and allocates a fraction of the
+  memory. Don't reuse a builder behind `build()`, though: see
+  [Working with messages](#working-with-messages).
 - **Lower level:** `Post.pack(builder, ...)` writes into a `FlatBufferBuilder` you own and returns
-  the offset, and `post.copyInto(builder)` re-serializes an existing message (for example, one
-  you received) into it. Structs have `copyInto` too, which writes them inline; inside a table,
-  it must be called right before that field's `add` call.
-- **Not supported yet:** tables with union fields or vectors of unions. They still get
-  `fromBytes`, but no `build`, and the build says which field is the reason. Build those by hand
-  with flatc's `start`/`add`/`end` functions. (Fixed-size arrays in structs never get this far:
-  flatc doesn't support them for Kotlin.)
+  the offset, and `post.copyInto(builder)` re-serializes an existing message into it. A struct's
+  `copyInto` and `writeTo` write it inline; inside a table, call them right before that field's
+  `add` call.
+- **Not supported yet:** tables with union fields or vectors of unions, and tables that nest one of
+  those. They still get `fromBytes`, but no `build`, and the build says which field is the reason.
+  Build those by hand with flatc's `start`/`add`/`end` functions. (Fixed-size arrays in structs
+  never get this far: flatc doesn't support them for Kotlin.)
 - **Optional scalars** (`count:int = null`) are written correctly even when set to `0`. flatc's
   own `addCount` would silently drop that value.
+- **Names:** a schema that already declares a type called `<Name>Spec` next to `<Name>` fails with a
+  clear error, since the generated spec class would clash with it.
 
 Turn the whole thing off with `scarabuff { generateBuilders.set(false) }`.
+
+### Upgrading from 0.4
+
+In 0.4, nested values were finished messages (`author = User.build(...)`), and each was built in
+a buffer of its own, then decoded and written again into the parent. Pass specs instead
+(`author = UserSpec(...)`), or `received.toSpec()` for a message you already have. For a 1000-item
+list, that makes building the message about 3x faster with about 5x less allocation, and about 9x
+faster with about 11x less allocation for a list of structs. `Vec2.build(...)` still works in
+this release, marked deprecated; use `Vec2Spec(...)`.
 
 ## Working with messages
 
@@ -217,12 +243,95 @@ access; it doesn't copy them out. With scarabuff's marshallers:
   pass between coroutines, and read later.
 - **Sent messages** are streamed straight from the table's backing array, without a copy. Don't
   reuse or `clear()` a `FlatBufferBuilder`, or write to its buffer, until the call has sent the
-  message. The simplest rule is one builder per message.
+  message: a message from `build()`, including one built with your own `builder`, is a view over
+  that builder's buffer. To reuse a builder, build with `buildBytes(builder = ...)`, which copies
+  the bytes out, and send `fromBytes(bytes)`; or give each message its own presized builder.
 - **Use heap buffers.** The marshaller needs `ByteBuffer.array()`, which a direct `ByteBuffer`
   doesn't have, so don't give `FlatBufferBuilder` a direct-buffer factory.
 - **Map at the edges.** Accessors decode on every call (each `.name` read builds a new `String`),
-  and a table keeps its whole message buffer alive. In app code, convert messages into your own
-  data classes at the network boundary rather than passing tables around.
+  and a table keeps its whole message buffer alive. In app code, convert messages into data classes
+  at the network boundary rather than passing tables around: `message.toSpec()` gives you the
+  generated ones, or map to your own domain models.
+- **Reading strings.** Read a string field once and keep the value, rather than calling `.name`
+  repeatedly. To compare one without decoding it, use the generated `nameEquals("Ada")`. It
+  compares UTF-8 bytes and allocates nothing: reading a field 5 times per item over 1000 items,
+  it takes about 28 µs and 0 bytes against 47 µs and 400 KB for `.name == "Ada"`. Beware of flatc's
+  own `nameAsByteBuffer`: it throws `NullPointerException` when an optional string is absent.
+  - To check presence without decoding, the helpers use a small generated `internal` object in the
+    `com.google.flatbuffers` package (`ScarabuffFieldAccess_<hash>`). That package can read
+    FlatBuffers' protected `__offset`, avoiding both reflection and a caught exception. It's fine
+    on Android and the normal JVM classpath; under the Java module system (JPMS) it would be a
+    split package.
+
+## Performance
+
+### FlatBuffers vs Protocol Buffers
+
+These numbers come from an external JMH benchmark run by a scarabuff user, and aren't in this
+repository. Setup:
+- JMH 1.37 on JDK 21 on an Apple-silicon Mac (one fork, 5 × 1 s iterations).
+- FlatBuffers via scarabuff 0.4.0 against protobuf-java 3.25.5 with grpc-kotlin, with the same
+  data on both sides.
+- The payload is an id, a title and N items of `{id, name, score, active}`.
+
+Treat differences under about 20% as noise.
+
+**Where FlatBuffers wins:**
+
+| Operation | FlatBuffers | Protocol Buffers |
+|---|---|---|
+| Read a few fields of a 1000-item message | ~2 ns, 0 B | 30 µs, 181 KB (it must parse first) |
+| Decode a 1000-item vector of numeric structs | 1.04 µs, 88 B | 11.5 µs, 61 KB |
+| Read every field of a table message | ~10% faster, ~35% less allocation | |
+| Marshaller round trip | 15–35% faster | |
+| Unary RPC, 8 threads, 1000 items (one run, indicative) | 186 µs, 73 KB | 244 µs, 201 KB |
+
+**Where it loses or ties:**
+
+| Operation | FlatBuffers | Protocol Buffers |
+|---|---|---|
+| Encode 1000 string-heavy items (hand-written flatc code) | 46.5 µs | 32.5 µs |
+| Encode 50 string-heavy items (hand-written flatc code) | 3.0 µs | 1.6 µs |
+| Wire size, 1000 table items | 56,096 B | 35,779 B |
+| Wire size, 1000 structs (a 17-byte struct is padded to 24) | 24,040 B | 14,863 B |
+| Streaming small messages | ~13 µs per message (server stream), ~23 µs (bidi) | about the same |
+
+- **Encoding string-heavy tables stays slower** even in hand-optimized code, because FlatBuffers
+  builds back to front and writes offsets.
+- **Small-message streaming is a tie:** gRPC and coroutine overhead dominate, so the message format
+  barely matters. FlatBuffers only allocates less.
+- **Not measured:** gRPC compression, messages of several MB, unions, direct buffers, and Android
+  devices.
+
+### scarabuff's own overhead
+
+The table above compares *hand-written* FlatBuffers code. scarabuff's generated builders add some
+overhead on top. These measurements come from a simpler timing loop, not JMH, on a different
+machine, so compare them with each other rather than with the table above:
+
+| Encode 1000 items | scarabuff 0.4.0 | scarabuff 0.5.0 | hand-written flatc code |
+|---|---|---|---|
+| Tables | 211 µs, 1.64 MB | 64 µs, 294 KB | 54–57 µs, 234 KB |
+| Structs | 93 µs, 1.36 MB | 10.6 µs, 125 KB | 7–8 µs, 89 KB |
+
+Since 0.5.0, builders write nested messages and structs into one buffer (see
+[Building messages](#building-messages)). They're within about 15% of hand-written code for
+tables, and about 1.5× for struct vectors, where the remaining cost is the spec objects.
+
+### Getting the most out of it
+
+- **Put numeric data in structs.** That's where FlatBuffers wins most clearly, on both encode and
+  decode.
+- **Use narrower types,** such as `float` instead of `double` and `ushort` instead of `int`, where
+  the range allows. That shrinks messages, which are larger than Protocol Buffers'.
+- **Presize or reuse builders** for small messages, which is about 30–40% faster (see
+  [Building messages](#building-messages)).
+- **Read each string field once,** or compare with `nameEquals` (see
+  [Working with messages](#working-with-messages)).
+- **Read only what you need.** Partial reads are where FlatBuffers is far ahead. Convert to a spec
+  or your own data class once, at the boundary.
+- **If writes of string-heavy data dominate, or bandwidth matters most,** Protocol Buffers is
+  probably the better format.
 
 ## Android
 
@@ -234,7 +343,7 @@ app:
 // api/build.gradle.kts
 plugins {
     kotlin("jvm")
-    id("io.github.microgeant.scarabuff") version "0.4.0"
+    id("io.github.microgeant.scarabuff") version "0.5.0"
 }
 
 // app/build.gradle.kts
@@ -279,6 +388,32 @@ Each release is tested by building and running `example/` against the published 
 Versions in between are very likely fine; these are the ones that are actually checked, by
 `./gradlew :scarabuff-gradle-plugin:functionalTest`. Gradle must run on JDK 17 or newer, and the
 configuration cache is supported.
+
+### Versioning
+
+What's covered by compatibility promises:
+- **The generated Kotlin API:** the names and signatures of the `<Service>GrpcKt` objects, stubs
+  and server base classes, the builder functions, and the spec classes.
+- **The plugin's settings** and the CLI's flags.
+- **The wire format,** which is always exactly flatc's, so messages and gRPC service and method
+  names stay compatible with any FlatBuffers client.
+
+The rules:
+- **Before 1.0, a minor release (0.x.0) may break that API.** Every break is listed under "Breaking"
+  in the [changelog](CHANGELOG.md), with how to migrate. Where possible, the old form stays one
+  more minor release, marked `@Deprecated` with a replacement hint, before it's removed.
+- **A patch release (0.x.y) never breaks it.**
+- **From 1.0, versions follow [semantic versioning](https://semver.org/):** breaking changes only
+  in major releases.
+- **Dropping a Gradle or Kotlin version** from the tested list above counts as a breaking change.
+
+Not covered:
+- Generated helpers that aren't meant to be called: `ScarabuffFieldAccess_<hash>`,
+  `scarabuffUtf8Equals`.
+- The `scarabuff-core` library, which is bundled inside the plugin and not published on its own.
+
+Each release is on the [GitHub releases page](https://github.com/microgeant/scarabuff/releases),
+with its changelog entry as the release notes.
 
 ## How scarabuff gets `flatc`
 
