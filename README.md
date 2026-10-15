@@ -81,7 +81,7 @@ scarabuff's current limits: JVM and Android only, with the schema in a Kotlin/JV
 // build.gradle.kts
 plugins {
     kotlin("jvm") version "2.2.10"
-    id("io.github.microgeant.scarabuff") version "0.3.0"
+    id("io.github.microgeant.scarabuff") version "0.4.0"
 }
 ```
 
@@ -234,7 +234,7 @@ app:
 // api/build.gradle.kts
 plugins {
     kotlin("jvm")
-    id("io.github.microgeant.scarabuff") version "0.3.0"
+    id("io.github.microgeant.scarabuff") version "0.4.0"
 }
 
 // app/build.gradle.kts
