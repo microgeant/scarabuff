@@ -48,7 +48,7 @@ rpc_service ClipAudioService {
 // build.gradle.kts
 plugins {
     kotlin("jvm") version "2.2.10"
-    id("io.github.microgeant.scarabuff") version "0.2.0"
+    id("io.github.microgeant.scarabuff") version "0.3.0"
 }
 ```
 
@@ -192,7 +192,7 @@ app:
 // api/build.gradle.kts
 plugins {
     kotlin("jvm")
-    id("io.github.microgeant.scarabuff") version "0.2.0"
+    id("io.github.microgeant.scarabuff") version "0.3.0"
 }
 
 // app/build.gradle.kts
