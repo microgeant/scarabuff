@@ -1,3 +1,5 @@
 namespace com.probe.common;
 
 table Shared { note:string; }
+
+struct Point { x:int; y:int; }

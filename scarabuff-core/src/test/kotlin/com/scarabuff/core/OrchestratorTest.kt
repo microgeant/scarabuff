@@ -149,7 +149,7 @@ class OrchestratorTest {
     }
 
     @Test
-    fun `every table in the schema directory gets a builders file, and structs don't`() {
+    fun `every table and struct in the schema directory gets a builders file`() {
         schema(
             "msgs.fbs",
             """
@@ -162,10 +162,14 @@ class OrchestratorTest {
 
         val result = generate()
 
-        assertThat(result.generatedKotlinFiles.map { it.name }).containsExactly("UserBuilders.kt", "PostBuilders.kt")
+        assertThat(result.generatedKotlinFiles.map { it.name })
+            .containsExactly("Vec2Builders.kt", "UserBuilders.kt", "PostBuilders.kt")
         val user = generated("com.probe.msgs.UserBuilders")
         assertThat(user).contains("fun User.Companion.build(id: UInt = 0u, name: String): User")
         assertThat(user).contains("fun User.Companion.fromBytes(bytes: ByteArray): User")
+        val vec2 = generated("com.probe.msgs.Vec2Builders")
+        assertThat(vec2).contains("fun Vec2.Companion.build(x: Float, y: Float): Vec2")
+        assertThat(vec2).contains("fun Vec2.copyInto(builder: FlatBufferBuilder): Int")
     }
 
     @Test
@@ -177,8 +181,7 @@ class OrchestratorTest {
             struct Vec2 { x:float; y:float; }
             table A { x:int; }
             union Payload { A }
-            table WithUnion { payload:Payload; }
-            table WithStruct { pos:Vec2; }
+            table WithUnion { payload:Payload; pos:Vec2; }
             """,
         )
 
@@ -186,7 +189,6 @@ class OrchestratorTest {
 
         assertThat(result.tablesWithoutBuilders).containsExactly(
             "com.probe.u.WithUnion", "union field `payload`",
-            "com.probe.u.WithStruct", "struct field `pos`",
         )
         val withUnion = generated("com.probe.u.WithUnionBuilders")
         assertThat(withUnion).contains("fun WithUnion.Companion.fromBytes(")

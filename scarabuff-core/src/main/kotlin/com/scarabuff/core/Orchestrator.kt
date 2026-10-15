@@ -1,9 +1,11 @@
 package com.scarabuff.core
 
 import com.scarabuff.core.codegen.GrpcCoroutineGenerator
+import com.scarabuff.core.codegen.StructBuilderGenerator
 import com.scarabuff.core.codegen.TableBuilderGenerator
 import com.scarabuff.core.fbs.BfbsReader
 import com.scarabuff.core.fbs.RpcServiceDef
+import com.scarabuff.core.fbs.StructDef
 import com.scarabuff.core.fbs.TableDef
 import com.squareup.kotlinpoet.FileSpec
 import java.io.File
@@ -20,7 +22,7 @@ data class ScarabuffResult(
 /**
  * Ties the pieces together: run `flatc --kotlin` to generate the FlatBuffers table classes, then
  * read the same schemas from flatc's binary schema output (`--binary --schema`) and emit a Kotlin
- * coroutine wrapper per `rpc_service` and builder functions per table.
+ * coroutine wrapper per `rpc_service` and builder functions per table and struct.
  *
  * flatc's `--grpc` generator has no Kotlin backend, so the gRPC `ServiceDescriptor`/
  * `MethodDescriptor` glue is built directly by [GrpcCoroutineGenerator] instead of delegated to a
@@ -39,7 +41,8 @@ object Orchestrator {
      * @param kotlinPackageSuffix appended to each service's `namespace` to form the package the
      *   generated `<Service>GrpcKt.kt` is written into. Empty (default) colocates it with the
      *   flatc-generated table classes it wraps; pass e.g. `.coroutines` to put it in a subpackage.
-     * @param generateBuilders whether to emit `<Table>Builders.kt` files (see [TableBuilderGenerator])
+     * @param generateBuilders whether to emit `<Table>Builders.kt` and `<Struct>Builders.kt` files
+     *   (see [TableBuilderGenerator] and [StructBuilderGenerator])
      */
     fun generate(
         schemaDir: File,
@@ -76,6 +79,10 @@ object Orchestrator {
         }
         val tablesWithoutBuilders = mutableMapOf<String, String>()
         if (generateBuilders) {
+            val structs = schema.structs.associateBy { it.type }
+            for (struct in schema.structs) {
+                write(StructBuilderGenerator.generate(struct, structs))
+            }
             for (table in schema.tables) {
                 write(TableBuilderGenerator.generate(table))
                 table.unsupportedReason?.let { tablesWithoutBuilders["${table.type.packageName}.${table.type.simpleName}"] = it }
@@ -85,10 +92,11 @@ object Orchestrator {
         return ScarabuffResult(outputDir, generatedFiles, tablesWithoutBuilders)
     }
 
-    private class Schema(val services: List<RpcServiceDef>, val tables: List<TableDef>)
+    private class Schema(val services: List<RpcServiceDef>, val tables: List<TableDef>, val structs: List<StructDef>)
 
     /**
-     * Compiles every schema to a `.bfbs` in a scratch directory and reads its services and tables.
+     * Compiles every schema to a `.bfbs` in a scratch directory and reads its services, tables and
+     * structs.
      * Each `.bfbs` also contains everything from the files it includes, hence the de-duplication.
      */
     private fun readSchema(flatc: String, schemaDir: File, fbsFiles: List<File>): Schema {
@@ -110,6 +118,7 @@ object Orchestrator {
                     // A table is only the root_type in its own file's .bfbs, so keep the copy that
                     // knows its file_identifier, if any.
                     .map { (_, copies) -> copies.firstOrNull { it.fileIdentifier != null } ?: copies.first() },
+                structs = bfbs.flatMap { BfbsReader.readStructs(it.duplicate(), compiled) }.distinctBy { it.type },
             )
         } finally {
             bfbsDir.deleteRecursively()

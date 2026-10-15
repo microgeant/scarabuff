@@ -73,6 +73,8 @@ sealed interface FieldKind {
     data class ScalarVector(val element: Scalar) : FieldKind
     data object StrVector : FieldKind
     data class TableVector(val element: FbsTypeName) : FieldKind
+    data class Struct(val type: FbsTypeName) : FieldKind
+    data class StructVector(val element: FbsTypeName) : FieldKind
 }
 
 data class FieldDef(
@@ -100,4 +102,20 @@ data class TableDef(
     /** Set when this table is the schema's `root_type` and the schema declares a `file_identifier`. */
     val fileIdentifier: String?,
     val unsupportedReason: String?,
+)
+
+/**
+ * A struct from the compiled schemas: fixed-size and inline, so every field is always present.
+ * Its fields are scalars (or enums), or other structs.
+ */
+data class StructDef(
+    val type: FbsTypeName,
+    val fields: List<StructFieldDef>,
+)
+
+data class StructFieldDef(
+    /** The name as written in the schema. */
+    val name: String,
+    /** A scalar or enum ([FieldKind.Scalar]) or a nested struct ([FieldKind.Struct]). */
+    val kind: FieldKind,
 )
