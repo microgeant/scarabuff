@@ -4,7 +4,7 @@ All notable changes to scarabuff. The format follows [Keep a Changelog](https://
 and versions follow the policy in the README's [Versioning](README.md#versioning) section: before
 1.0, a minor release (0.x.0) may break things, and always says so here first, with how to migrate.
 
-## [0.5.0] - Unreleased
+## [0.5.0] - 2026-10-16
 
 ### Breaking
 
@@ -94,7 +94,7 @@ and versions follow the policy in the README's [Versioning](README.md#versioning
   2026-10-14). It generates Kotlin coroutine gRPC stubs for all four call shapes from `.fbs`
   `rpc_service` definitions, as pure Kotlin. A standalone CLI is also included.
 
-[0.5.0]: https://github.com/microgeant/scarabuff/compare/v0.4.0...dev
+[0.5.0]: https://github.com/microgeant/scarabuff/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/microgeant/scarabuff/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/microgeant/scarabuff/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/microgeant/scarabuff/releases/tag/v0.2.0
