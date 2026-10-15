@@ -28,6 +28,7 @@ jobs:
         run: |
           nix develop -c ./gradlew build
           nix develop -c bash -c 'cd example && ./gradlew test'
+          nix develop -c ./gradlew :scarabuff-gradle-plugin:functionalTest
 
       - name: Publish to Gradle Plugin Portal
         env:

@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v27
+
+      # The devShell provides the pinned flatc, JDK 17 and $FLATC, same as local development.
+      - name: Build and test
+        run: |
+          nix develop -c ./gradlew build
+          nix develop -c bash -c 'cd example && ./gradlew test'
+
+      # Builds example/ against the published plugin on every supported Gradle/Kotlin version,
+      # with no FLATC set, so the plugin's flatc download is exercised too.
+      - name: Functional tests (Gradle/Kotlin matrix)
+        run: nix develop -c ./gradlew :scarabuff-gradle-plugin:functionalTest

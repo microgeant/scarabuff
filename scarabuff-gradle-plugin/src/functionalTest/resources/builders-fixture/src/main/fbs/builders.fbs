@@ -1,0 +1,58 @@
+// Every field kind the builder generator supports, plus the naming and default edge cases.
+include "common.fbs";
+
+namespace com.probe.builders;
+
+enum Color:byte { Red, Green = 3 }
+enum Level:ubyte { Low, High }
+
+table Inner { v:int; label:string; }
+
+table All {
+  a_bool:bool = true;
+  a_byte:byte = -2;
+  a_ubyte:ubyte = 7;
+  a_short:short;
+  a_ushort:ushort;
+  a_int:int = 42;
+  a_uint:uint = 9;
+  a_long:long = -5;
+  // flatc's own Kotlin output doesn't compile for ulong defaults above Long.MAX_VALUE.
+  a_ulong:ulong = 6;
+  a_float:float = 1.5;
+  a_double:double = 2.25;
+  color:Color = Green;
+  level:Level = High;
+  nan_float:float = nan;
+  inf_double:double = -inf;
+  some_text:string;
+  inner:Inner;
+  other_ns:com.probe.common.Shared;
+  v_bool:[bool];
+  v_byte:[byte];
+  v_ubyte:[ubyte];
+  v_short:[short];
+  v_ushort:[ushort];
+  v_int:[int];
+  v_uint:[uint];
+  v_long:[long];
+  v_ulong:[ulong];
+  v_float:[float];
+  v_double:[double];
+  v_color:[Color];
+  v_string:[string];
+  v_inner:[Inner];
+  opt_int:int = null;
+  old:int (deprecated);
+  object:int;
+  when:[string];
+}
+
+table Strict {
+  name:string (required);
+  inner:Inner (required);
+  ids:[int] (required);
+}
+
+root_type Strict;
+file_identifier "STRT";

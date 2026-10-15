@@ -1,5 +1,6 @@
 package com.scarabuff.core.codegen
 
+import com.scarabuff.core.fbs.FbsTypeName
 import com.scarabuff.core.fbs.RpcMethod
 import com.scarabuff.core.fbs.RpcServiceDef
 import com.scarabuff.core.fbs.StreamingKind
@@ -97,18 +98,16 @@ object GrpcCoroutineGenerator {
     )
 
     /**
-     * @param dataPackage the package flatc's `--kotlin` output emitted `<Type>` table classes into
      * @param kotlinPackage the package to emit the generated `<Service>GrpcKt` file into; defaults
-     *   to [dataPackage] (colocate the coroutine wrapper with the flatc-generated table classes it
-     *   wraps)
+     *   to the service's namespace, which is where flatc's `--kotlin` output puts the table
+     *   classes declared alongside it
      */
     fun generate(
         service: RpcServiceDef,
-        dataPackage: String,
-        kotlinPackage: String = dataPackage,
+        kotlinPackage: String = service.namespace,
     ): FileSpec {
         val objectName = "${service.name}GrpcKt"
-        val serviceNameConst = "$dataPackage.${service.name}"
+        val serviceNameConst = service.qualifiedName
 
         val objectBuilder = TypeSpec.objectBuilder(objectName)
             .addProperty(
@@ -119,12 +118,12 @@ object GrpcCoroutineGenerator {
             )
 
         for (method in service.methods) {
-            objectBuilder.addProperty(methodDescriptorProperty(method, dataPackage))
+            objectBuilder.addProperty(methodDescriptorProperty(method))
         }
         objectBuilder.addProperty(serviceDescriptorProperty(service))
 
-        objectBuilder.addType(buildStubClass(service, dataPackage))
-        objectBuilder.addType(buildImplBaseClass(service, dataPackage))
+        objectBuilder.addType(buildStubClass(service))
+        objectBuilder.addType(buildImplBaseClass(service))
 
         return FileSpec.builder(kotlinPackage, objectName)
             .addType(objectBuilder.build())
@@ -159,10 +158,10 @@ object GrpcCoroutineGenerator {
             FLATBUFFERS_UTILS, typeClass, extractorExpression(typeClass),
         )
 
-    private fun methodDescriptorProperty(method: RpcMethod, dataPackage: String): PropertySpec {
+    private fun methodDescriptorProperty(method: RpcMethod): PropertySpec {
         val strategy = STRATEGIES.getValue(method.streaming)
-        val requestClass = ClassName(dataPackage, method.requestType)
-        val responseClass = ClassName(dataPackage, method.responseType)
+        val requestClass = method.requestType.toClassName()
+        val responseClass = method.responseType.toClassName()
         val type = METHOD_DESCRIPTOR.parameterizedBy(requestClass, responseClass)
 
         val body = CodeBlock.builder()
@@ -198,7 +197,7 @@ object GrpcCoroutineGenerator {
             .build()
     }
 
-    private fun buildStubClass(service: RpcServiceDef, dataPackage: String): TypeSpec {
+    private fun buildStubClass(service: RpcServiceDef): TypeSpec {
         val stubClassName = "${service.name}CoroutineStub"
         val selfType = ClassName("", stubClassName)
 
@@ -234,15 +233,20 @@ object GrpcCoroutineGenerator {
 
         for (method in service.methods) {
             val strategy = STRATEGIES.getValue(method.streaming)
-            val requestClass = ClassName(dataPackage, method.requestType)
-            val responseClass = ClassName(dataPackage, method.responseType)
-            val paramName = decapitalize(method.requestType)
+            val requestClass = method.requestType.toClassName()
+            val responseClass = method.responseType.toClassName()
+            val paramName = requestParamName(strategy)
             val paramType = if (strategy.requestIsFlow) FLOW.parameterizedBy(requestClass) else requestClass
             val returnType = if (strategy.responseIsFlow) FLOW.parameterizedBy(responseClass) else responseClass
 
             val fn = FunSpec.builder(decapitalize(method.name))
                 .apply { if (strategy.isSuspend) addModifiers(KModifier.SUSPEND) }
                 .addParameter(paramName, paramType)
+                .addParameter(
+                    ParameterSpec.builder("headers", METADATA)
+                        .defaultValue("%T()", METADATA)
+                        .build()
+                )
                 .returns(returnType)
                 .addCode(
                     CodeBlock.builder()
@@ -252,7 +256,7 @@ object GrpcCoroutineGenerator {
                         .add("get%LMethod,\n", method.name)
                         .add("%L,\n", paramName)
                         .add("callOptions,\n")
-                        .add("%T()\n", METADATA)
+                        .add("headers\n")
                         .unindent()
                         .add(")\n")
                         .build()
@@ -264,7 +268,7 @@ object GrpcCoroutineGenerator {
         return builder.build()
     }
 
-    private fun buildImplBaseClass(service: RpcServiceDef, dataPackage: String): TypeSpec {
+    private fun buildImplBaseClass(service: RpcServiceDef): TypeSpec {
         val implClassName = "${service.name}CoroutineImplBase"
 
         val constructor = FunSpec.constructorBuilder()
@@ -283,9 +287,9 @@ object GrpcCoroutineGenerator {
 
         for (method in service.methods) {
             val strategy = STRATEGIES.getValue(method.streaming)
-            val requestClass = ClassName(dataPackage, method.requestType)
-            val responseClass = ClassName(dataPackage, method.responseType)
-            val paramName = decapitalize(method.requestType)
+            val requestClass = method.requestType.toClassName()
+            val responseClass = method.responseType.toClassName()
+            val paramName = requestParamName(strategy)
             val paramType = if (strategy.requestIsFlow) FLOW.parameterizedBy(requestClass) else requestClass
             val returnType = if (strategy.responseIsFlow) FLOW.parameterizedBy(responseClass) else responseClass
 
@@ -337,6 +341,15 @@ object GrpcCoroutineGenerator {
 
         return builder.build()
     }
+
+    /**
+     * Named for the call shape rather than the request type: a type-derived name like `channel`
+     * (for a table called `Channel`) would shadow the stub's own `channel` property.
+     */
+    private fun requestParamName(strategy: StreamingStrategy): String =
+        if (strategy.requestIsFlow) "requests" else "request"
+
+    private fun FbsTypeName.toClassName(): ClassName = ClassName(packageName, simpleName)
 
     private fun decapitalize(s: String): String = s.replaceFirstChar { it.lowercaseChar() }
 }

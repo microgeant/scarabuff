@@ -65,8 +65,8 @@
           default = pkgs.mkShell {
             packages = [ flatc pkgs.jdk17 pkgs.gradle ];
 
-            # ScarabuffExtension.flatc defaults to $FLATC, falling back to `flatc` on PATH —
-            # this is what makes the pin actually take effect for consumers of the plugin.
+            # ScarabuffExtension.flatc defaults to $FLATC, so inside this shell the plugin uses
+            # this pinned flatc instead of downloading its own (the same version either way).
             shellHook = ''
               export FLATC=${flatc}/bin/flatc
               echo "scarabuff devShell: $($FLATC --version), $(java -version 2>&1 | head -1)"

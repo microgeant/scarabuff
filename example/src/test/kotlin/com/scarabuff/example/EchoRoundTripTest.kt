@@ -1,7 +1,6 @@
 package com.scarabuff.example
 
 import com.google.common.truth.Truth.assertThat
-import com.google.flatbuffers.FlatBufferBuilder
 import com.scarabuff.example.echo.EchoChatServiceGrpcKt.EchoChatServiceCoroutineImplBase
 import com.scarabuff.example.echo.EchoChatServiceGrpcKt.EchoChatServiceCoroutineStub
 import com.scarabuff.example.echo.EchoCollectServiceGrpcKt.EchoCollectServiceCoroutineImplBase
@@ -12,9 +11,15 @@ import com.scarabuff.example.echo.EchoServiceGrpcKt.EchoServiceCoroutineImplBase
 import com.scarabuff.example.echo.EchoServiceGrpcKt.EchoServiceCoroutineStub
 import com.scarabuff.example.echo.EchoStreamServiceGrpcKt.EchoStreamServiceCoroutineImplBase
 import com.scarabuff.example.echo.EchoStreamServiceGrpcKt.EchoStreamServiceCoroutineStub
+import com.scarabuff.example.echo.build
 import io.grpc.BindableService
 import io.grpc.ManagedChannel
+import io.grpc.Metadata
 import io.grpc.Server
+import io.grpc.ServerCall
+import io.grpc.ServerCallHandler
+import io.grpc.ServerInterceptor
+import io.grpc.ServerInterceptors
 import io.grpc.inprocess.InProcessChannelBuilder
 import io.grpc.inprocess.InProcessServerBuilder
 import kotlinx.coroutines.flow.Flow
@@ -49,8 +54,8 @@ class EchoRoundTripTest {
     @Test
     fun `unary echo`() = runBlocking {
         startServer(object : EchoServiceCoroutineImplBase() {
-            override suspend fun echo(echoRequest: EchoRequest): EchoResponse =
-                echoResponse("echo: ${echoRequest.message}")
+            override suspend fun echo(request: EchoRequest): EchoResponse =
+                echoResponse("echo: ${request.message}")
         })
 
         val response = EchoServiceCoroutineStub(channel).echo(echoRequest("hello"))
@@ -59,10 +64,38 @@ class EchoRoundTripTest {
     }
 
     @Test
+    fun `per-call headers reach the server`() = runBlocking {
+        val traceKey = Metadata.Key.of("x-trace-id", Metadata.ASCII_STRING_MARSHALLER)
+        var receivedTraceId: String? = null
+        val captureHeaders = object : ServerInterceptor {
+            override fun <ReqT, RespT> interceptCall(
+                call: ServerCall<ReqT, RespT>,
+                headers: Metadata,
+                next: ServerCallHandler<ReqT, RespT>,
+            ): ServerCall.Listener<ReqT> {
+                receivedTraceId = headers.get(traceKey)
+                return next.startCall(call, headers)
+            }
+        }
+        val service = object : EchoServiceCoroutineImplBase() {
+            override suspend fun echo(request: EchoRequest): EchoResponse = echoResponse(request.message!!)
+        }
+        val name = InProcessServerBuilder.generateName()
+        server = InProcessServerBuilder.forName(name).directExecutor()
+            .addService(ServerInterceptors.intercept(service, captureHeaders)).build().start()
+        channel = InProcessChannelBuilder.forName(name).directExecutor().build()
+
+        val headers = Metadata().apply { put(traceKey, "abc123") }
+        EchoServiceCoroutineStub(channel).echo(echoRequest("hi"), headers)
+
+        assertThat(receivedTraceId).isEqualTo("abc123")
+    }
+
+    @Test
     fun `server streaming echo`() = runBlocking {
         startServer(object : EchoStreamServiceCoroutineImplBase() {
-            override fun observeEcho(echoRequest: EchoRequest): Flow<EchoResponse> =
-                flowOf(1, 2, 3).map { echoResponse("${echoRequest.message}-$it") }
+            override fun observeEcho(request: EchoRequest): Flow<EchoResponse> =
+                flowOf(1, 2, 3).map { echoResponse("${request.message}-$it") }
         })
 
         val responses = EchoStreamServiceCoroutineStub(channel).observeEcho(echoRequest("tick")).toList()
@@ -73,8 +106,8 @@ class EchoRoundTripTest {
     @Test
     fun `client streaming echo`() = runBlocking {
         startServer(object : EchoCollectServiceCoroutineImplBase() {
-            override suspend fun collectEcho(echoRequest: Flow<EchoRequest>): EchoResponse {
-                val messages = echoRequest.toList().map { it.message }
+            override suspend fun collectEcho(requests: Flow<EchoRequest>): EchoResponse {
+                val messages = requests.toList().map { it.message }
                 return echoResponse(messages.joinToString(","))
             }
         })
@@ -88,8 +121,8 @@ class EchoRoundTripTest {
     @Test
     fun `bidi streaming echo`() = runBlocking {
         startServer(object : EchoChatServiceCoroutineImplBase() {
-            override fun chatEcho(echoRequest: Flow<EchoRequest>): Flow<EchoResponse> =
-                echoRequest.map { echoResponse("chat:${it.message}") }
+            override fun chatEcho(requests: Flow<EchoRequest>): Flow<EchoResponse> =
+                requests.map { echoResponse("chat:${it.message}") }
         })
 
         val requests = flowOf("x", "y").map { echoRequest(it) }
@@ -98,19 +131,8 @@ class EchoRoundTripTest {
         assertThat(responses.map { it.message }).containsExactly("chat:x", "chat:y").inOrder()
     }
 
-    private fun echoRequest(message: String): EchoRequest {
-        val builder = FlatBufferBuilder(64)
-        val messageOffset = builder.createString(message)
-        val requestOffset = EchoRequest.createEchoRequest(builder, messageOffset)
-        builder.finish(requestOffset)
-        return EchoRequest.getRootAsEchoRequest(builder.dataBuffer())
-    }
+    // build() is generated by scarabuff for every table (see EchoRequestBuilders.kt in the build dir)
+    private fun echoRequest(message: String) = EchoRequest.build(message = message)
 
-    private fun echoResponse(message: String): EchoResponse {
-        val builder = FlatBufferBuilder(64)
-        val messageOffset = builder.createString(message)
-        val responseOffset = EchoResponse.createEchoResponse(builder, messageOffset)
-        builder.finish(responseOffset)
-        return EchoResponse.getRootAsEchoResponse(builder.dataBuffer())
-    }
+    private fun echoResponse(message: String) = EchoResponse.build(message = message)
 }
