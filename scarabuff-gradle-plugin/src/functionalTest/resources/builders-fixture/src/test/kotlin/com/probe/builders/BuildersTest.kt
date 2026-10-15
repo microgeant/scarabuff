@@ -2,6 +2,7 @@ package com.probe.builders
 
 import com.google.common.truth.Truth.assertThat
 import com.google.flatbuffers.FlatBufferBuilder
+import com.probe.common.Point
 import com.probe.common.Shared
 import com.probe.common.build
 import java.nio.ByteBuffer
@@ -113,5 +114,52 @@ class BuildersTest {
         val builder = FlatBufferBuilder()
         builder.finish(strict.copyInto(builder))
         assertThat(Strict.getRootAsStrict(builder.dataBuffer()).name).isEqualTo("strict")
+    }
+
+    @Test
+    fun `structs build standalone and round-trip inside tables`() {
+        val origin = Vec2.build(x = 1.5f, y = -2f)
+        assertThat(origin.x).isEqualTo(1.5f)
+        assertThat(origin.y).isEqualTo(-2f)
+
+        val shapes = Shapes.build(
+            origin = origin,
+            pose = Pose.build(position = Vec2.build(x = 3f, y = 4f), angle = 0.5, color = Color.Green, visible = true),
+            path = listOf(Vec2.build(0f, 0f), Vec2.build(1f, 1f), Vec2.build(2f, 4f)),
+            otherNs = Point.build(x = 7, y = 8),
+            bounds = Bounds.build(in_ = 10, is_ = 20),
+        )
+
+        assertThat(shapes.origin!!.x).isEqualTo(1.5f)
+        assertThat(shapes.pose.position!!.y).isEqualTo(4f)
+        assertThat(shapes.pose.angle).isEqualTo(0.5)
+        assertThat(shapes.pose.color).isEqualTo(Color.Green)
+        assertThat(shapes.pose.visible).isTrue()
+        assertThat(List(shapes.pathLength) { shapes.path(it)!!.y }).containsExactly(0f, 1f, 4f).inOrder()
+        assertThat(shapes.otherNs!!.y).isEqualTo(8)
+        assertThat(shapes.bounds!!.in_).isEqualTo(10)
+        assertThat(shapes.bounds!!.is_).isEqualTo(20)
+    }
+
+    @Test
+    fun `optional struct fields stay absent, and copyInto keeps structs`() {
+        val minimal = Shapes.build(pose = Pose.build(Vec2.build(0f, 0f), angle = 1.0, color = Color.Red, visible = false))
+        assertThat(minimal.origin).isNull()
+        assertThat(minimal.pathLength).isEqualTo(0)
+
+        val original = Shapes.fromBytes(
+            Shapes.buildBytes(
+                pose = Pose.build(Vec2.build(5f, 6f), angle = 2.0, color = Color.Green, visible = true),
+                path = listOf(Vec2.build(9f, 9f)),
+            )
+        )
+        val builder = FlatBufferBuilder()
+        builder.finish(original.copyInto(builder))
+        val copy = Shapes.getRootAsShapes(builder.dataBuffer())
+
+        assertThat(copy.pose.position!!.x).isEqualTo(5f)
+        assertThat(copy.pose.visible).isTrue()
+        assertThat(copy.path(0)!!.x).isEqualTo(9f)
+        assertThat(copy.origin).isNull()
     }
 }

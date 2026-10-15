@@ -41,6 +41,30 @@ object BfbsReader {
             .map { table -> readTable(schema, table, fileIdentifier.takeIf { table.name() == root }) }
     }
 
+    /** Reads the structs declared in [declarationFiles]; see [readTables]. */
+    fun readStructs(bfbs: ByteBuffer, declarationFiles: Set<String>): List<StructDef> {
+        val schema = Schema.getRootAsSchema(bfbs)
+        return (0 until schema.objectsLength())
+            .map { schema.objects(it) }
+            .filter { it.isStruct && it.declarationFile() in declarationFiles }
+            .map { struct ->
+                StructDef(
+                    type = FbsTypeName.fromQualified(struct.name()),
+                    fields = (0 until struct.fieldsLength())
+                        .map { struct.fields(it) }
+                        .sortedBy { it.id() } // flatc's create<Struct> takes fields in declaration order
+                        .map { field -> StructFieldDef(field.name(), structFieldKind(schema, struct, field)) },
+                )
+            }
+    }
+
+    /** A struct field is a scalar, an enum or another struct; flatc rejects fixed-size arrays for Kotlin. */
+    private fun structFieldKind(schema: Schema, struct: Object, field: Field): FieldKind =
+        when (val kind = fieldKind(schema, field.type())) {
+            is Kind.Supported -> kind.kind.takeIf { it is FieldKind.Scalar || it is FieldKind.Struct }
+            is Kind.Unsupported -> null
+        } ?: error("Unexpected field `${field.name()}` in struct ${struct.name()}")
+
     private fun readTable(schema: Schema, table: Object, fileIdentifier: String?): TableDef {
         val fields = (0 until table.fieldsLength())
             .map { table.fields(it) }
@@ -74,7 +98,7 @@ object BfbsReader {
     private fun fieldKind(schema: Schema, type: Type): Kind = when (type.baseType()) {
         BaseType.String -> Kind.Supported(FieldKind.Str)
         BaseType.Obj ->
-            if (schema.objects(type.index()).isStruct) Kind.Unsupported("struct")
+            if (schema.objects(type.index()).isStruct) Kind.Supported(FieldKind.Struct(objectName(schema, type)))
             else Kind.Supported(FieldKind.Table(objectName(schema, type)))
         BaseType.Union -> Kind.Unsupported("union")
         BaseType.Array -> Kind.Unsupported("fixed-size array")
@@ -82,7 +106,7 @@ object BfbsReader {
         BaseType.Vector -> when (val element = type.element()) {
             BaseType.String -> Kind.Supported(FieldKind.StrVector)
             BaseType.Obj ->
-                if (schema.objects(type.index()).isStruct) Kind.Unsupported("vector-of-structs")
+                if (schema.objects(type.index()).isStruct) Kind.Supported(FieldKind.StructVector(objectName(schema, type)))
                 else Kind.Supported(FieldKind.TableVector(objectName(schema, type)))
             BaseType.Union -> Kind.Unsupported("vector-of-unions")
             else -> scalar(schema, element, type.index())?.let { Kind.Supported(FieldKind.ScalarVector(it)) }

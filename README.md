@@ -118,11 +118,13 @@ a complete, runnable version of all four shapes.
 ## Building messages
 
 flatc's Kotlin output has no object API, so on its own every message needs a series of
-`FlatBufferBuilder` calls. scarabuff generates a `<Table>Builders.kt` for each table instead:
+`FlatBufferBuilder` calls. scarabuff generates a `<Table>Builders.kt` for each table, and a
+`<Struct>Builders.kt` for each struct, instead:
 
 ```fbs
+struct Vec2 { x:float; y:float; }
 table User { id:uint; name:string (required); }
-table Post { title:string; author:User; tags:[string]; }
+table Post { title:string; author:User; tags:[string]; pin:Vec2; route:[Vec2]; }
 ```
 
 ```kotlin
@@ -130,6 +132,8 @@ val post: Post = Post.build(
     title = "Hello",
     author = User.build(id = 1u, name = "Ada"), // nested messages are copied in
     tags = listOf("intro", "kotlin"),
+    pin = Vec2.build(x = 1f, y = 2f),           // structs too
+    route = listOf(Vec2.build(0f, 0f), Vec2.build(3f, 4f)),
 )
 
 val bytes: ByteArray = Post.buildBytes(title = "Hello")
@@ -139,13 +143,18 @@ val again: Post = Post.fromBytes(bytes)
 - **Parameters** follow the field order and flatc's names (`created_at` becomes `createdAt`).
   Required fields are non-null parameters with no default, so leaving one out is a compile error.
   Everything else defaults to the schema's default, or `null`.
-- **Lists:** vectors take a `List` (`List<Int>`, `List<String>`, `List<User>`, ...).
+- **Lists:** vectors take a `List` (`List<Int>`, `List<String>`, `List<User>`, `List<Vec2>`, ...).
+- **Structs:** `Vec2.build(...)` returns a `Vec2`, the same type flatc's accessors return, so a
+  struct read from one message can be passed straight into another. A struct always has every
+  field, so all of `build`'s parameters are required.
 - **Lower level:** `Post.pack(builder, ...)` writes into a `FlatBufferBuilder` you own and returns
   the offset, and `post.copyInto(builder)` re-serializes an existing message (for example, one
-  you received) into it.
-- **Not supported yet:** tables with struct, union or fixed-size array fields, or vectors of
-  structs or unions. They still get `fromBytes`, but no `build`, and the build says which field
-  is the reason. Build those by hand with flatc's `start`/`add`/`end` functions.
+  you received) into it. Structs have `copyInto` too, which writes them inline; inside a table,
+  it must be called right before that field's `add` call.
+- **Not supported yet:** tables with union fields or vectors of unions. They still get
+  `fromBytes`, but no `build`, and the build says which field is the reason. Build those by hand
+  with flatc's `start`/`add`/`end` functions. (Fixed-size arrays in structs never get this far:
+  flatc doesn't support them for Kotlin.)
 - **Optional scalars** (`count:int = null`) are written correctly even when set to `0`. flatc's
   own `addCount` would silently drop that value.
 

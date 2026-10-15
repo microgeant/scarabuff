@@ -6,27 +6,17 @@ import com.scarabuff.core.fbs.FieldKind
 import com.scarabuff.core.fbs.ScalarType
 import com.scarabuff.core.fbs.TableDef
 import com.squareup.kotlinpoet.AnnotationSpec
-import com.squareup.kotlinpoet.BOOLEAN
-import com.squareup.kotlinpoet.BYTE
 import com.squareup.kotlinpoet.BYTE_ARRAY
 import com.squareup.kotlinpoet.ClassName
 import com.squareup.kotlinpoet.CodeBlock
-import com.squareup.kotlinpoet.DOUBLE
-import com.squareup.kotlinpoet.FLOAT
 import com.squareup.kotlinpoet.FileSpec
 import com.squareup.kotlinpoet.FunSpec
 import com.squareup.kotlinpoet.INT
 import com.squareup.kotlinpoet.LIST
-import com.squareup.kotlinpoet.LONG
 import com.squareup.kotlinpoet.ParameterSpec
 import com.squareup.kotlinpoet.ParameterizedTypeName.Companion.parameterizedBy
-import com.squareup.kotlinpoet.SHORT
 import com.squareup.kotlinpoet.STRING
 import com.squareup.kotlinpoet.TypeName
-import com.squareup.kotlinpoet.U_BYTE
-import com.squareup.kotlinpoet.U_INT
-import com.squareup.kotlinpoet.U_LONG
-import com.squareup.kotlinpoet.U_SHORT
 
 /**
  * Generates `<Table>Builders.kt` for one table: extension functions on the flatc-generated class
@@ -52,13 +42,6 @@ object TableBuilderGenerator {
     private val EXPERIMENTAL_UNSIGNED_TYPES = ClassName("kotlin", "ExperimentalUnsignedTypes")
     private val OPT_IN = ClassName("kotlin", "OptIn")
 
-    /** Kotlin's hard keywords; flatc appends `_` to field names that collide with them. */
-    private val KOTLIN_KEYWORDS = setOf(
-        "as", "break", "class", "continue", "do", "else", "false", "for", "fun", "if", "in",
-        "interface", "is", "null", "object", "package", "return", "super", "this", "throw", "true",
-        "try", "typealias", "typeof", "val", "var", "when", "while",
-    )
-
     fun generate(table: TableDef): FileSpec {
         val tableClass = table.type.toClassName()
         val file = FileSpec.builder(table.type.packageName, "${table.type.simpleName}Builders")
@@ -69,10 +52,10 @@ object TableBuilderGenerator {
                     AnnotationSpec.builder(OPT_IN).addMember("%T::class", EXPERIMENTAL_UNSIGNED_TYPES).build()
                 )
             }
-            // Nested tables from other namespaces have their copyInto in their own package. KotlinPoet
+            // Nested tables and structs from other namespaces have their copyInto in their own package. KotlinPoet
             // won't import a name this file also declares, so import it by hand; Kotlin picks the
             // overload by receiver type.
-            table.fields.mapNotNull { it.nestedTable()?.packageName }
+            table.fields.mapNotNull { it.nestedType()?.packageName }
                 .filter { it != table.type.packageName }
                 .distinct()
                 .forEach { file.addImport(it, "copyInto") }
@@ -100,7 +83,8 @@ object TableBuilderGenerator {
             val name = field.kotlinName()
             val offset = offsetVal(field)
             val create: CodeBlock = when (val kind = field.kind) {
-                is FieldKind.Scalar -> continue
+                // Structs are written inline, right before their add call (see below).
+                is FieldKind.Scalar, is FieldKind.Struct -> continue
                 FieldKind.Str -> CodeBlock.of("builder.createString(%L)", "it")
                 is FieldKind.Table -> CodeBlock.of("it.copyInto(builder)")
                 is FieldKind.ScalarVector -> CodeBlock.of(
@@ -112,6 +96,11 @@ object TableBuilderGenerator {
                 )
                 is FieldKind.TableVector -> CodeBlock.of(
                     "%T.create%LVector(builder, IntArray(it.size) { i -> it[i].copyInto(builder) })",
+                    tableClass, field.vectorName(),
+                )
+                // flatc has no create<Field>Vector for structs: they're written in place, last first.
+                is FieldKind.StructVector -> CodeBlock.of(
+                    "%T.start%LVector(builder, it.size); it.asReversed().forEach { s -> s.copyInto(builder) }; builder.endVector()",
                     tableClass, field.vectorName(),
                 )
             }
@@ -134,6 +123,11 @@ object TableBuilderGenerator {
                     )
                 field.kind is FieldKind.Scalar ->
                     body.addStatement("%T.%L(builder, %L)", tableClass, add, field.kotlinName())
+                // A struct must be written immediately before the add call that places it.
+                field.kind is FieldKind.Struct && field.required ->
+                    body.addStatement("%T.%L(builder, %L.copyInto(builder))", tableClass, add, field.kotlinName())
+                field.kind is FieldKind.Struct ->
+                    body.addStatement("%L?.let { %T.%L(builder, it.copyInto(builder)) }", field.kotlinName(), tableClass, add)
                 field.required ->
                     body.addStatement("%T.%L(builder, %L)", tableClass, add, offsetVal(field))
                 else ->
@@ -160,9 +154,9 @@ object TableBuilderGenerator {
         val args = table.fields.map { field ->
             val name = field.kotlinName()
             val value = when (field.kind) {
-                is FieldKind.Scalar, FieldKind.Str, is FieldKind.Table -> CodeBlock.of("this.%L", name)
-                is FieldKind.ScalarVector, FieldKind.StrVector, is FieldKind.TableVector -> {
-                    // Elements of string and table vectors are never null in a valid buffer.
+                is FieldKind.Scalar, FieldKind.Str, is FieldKind.Table, is FieldKind.Struct -> CodeBlock.of("this.%L", name)
+                is FieldKind.ScalarVector, FieldKind.StrVector, is FieldKind.TableVector, is FieldKind.StructVector -> {
+                    // Elements of string, table and struct vectors are never null in a valid buffer.
                     val element = if (field.kind is FieldKind.ScalarVector) "this.$name(it)" else "this.$name(it)!!"
                     val list = CodeBlock.of("List(this.%LLength) { %L }", name, element)
                     // An absent vector and an empty one read the same; optional ones are written
@@ -242,6 +236,8 @@ object TableBuilderGenerator {
         is FieldKind.ScalarVector -> LIST.parameterizedBy(element.type.typeName())
         FieldKind.StrVector -> LIST.parameterizedBy(STRING)
         is FieldKind.TableVector -> LIST.parameterizedBy(element.toClassName())
+        is FieldKind.Struct -> type.toClassName()
+        is FieldKind.StructVector -> LIST.parameterizedBy(element.toClassName())
     }
 
     /** FlatBufferBuilder's untyped-slot `add` call for a scalar named `it`. */
@@ -259,23 +255,12 @@ object TableBuilderGenerator {
         ScalarType.DOUBLE -> "addDouble(it)"
     }
 
-    private fun ScalarType.typeName(): TypeName = when (this) {
-        ScalarType.BOOL -> BOOLEAN
-        ScalarType.BYTE -> BYTE
-        ScalarType.UBYTE -> U_BYTE
-        ScalarType.SHORT -> SHORT
-        ScalarType.USHORT -> U_SHORT
-        ScalarType.INT -> INT
-        ScalarType.UINT -> U_INT
-        ScalarType.LONG -> LONG
-        ScalarType.ULONG -> U_LONG
-        ScalarType.FLOAT -> FLOAT
-        ScalarType.DOUBLE -> DOUBLE
-    }
-
-    private fun FieldDef.nestedTable(): FbsTypeName? = when (val kind = kind) {
+    /** A table or struct this field holds, whose generated copyInto the builders call. */
+    private fun FieldDef.nestedType(): FbsTypeName? = when (val kind = kind) {
         is FieldKind.Table -> kind.type
         is FieldKind.TableVector -> kind.element
+        is FieldKind.Struct -> kind.type
+        is FieldKind.StructVector -> kind.element
         else -> null
     }
 
@@ -284,29 +269,15 @@ object TableBuilderGenerator {
         return vector.element.type in setOf(ScalarType.UBYTE, ScalarType.USHORT, ScalarType.UINT, ScalarType.ULONG)
     }
 
-    private fun FieldDef.camelName(): String {
-        val parts = name.split('_').filter { it.isNotEmpty() }
-        return parts.first().replaceFirstChar { it.lowercaseChar() } +
-            parts.drop(1).joinToString("") { part -> part.replaceFirstChar { it.uppercaseChar() } }
-    }
-
-    /**
-     * The name flatc's Kotlin output uses for this field's accessor, `add` function and length:
-     * lowerCamelCase, with `_` appended to Kotlin keywords (`object` becomes `object_`).
-     */
-    private fun FieldDef.kotlinName(): String = camelName().let { if (it in KOTLIN_KEYWORDS) "${it}_" else it }
+    private fun FieldDef.kotlinName(): String = FlatcNames.accessor(name)
 
     private fun FieldDef.capitalizedName() = kotlinName().replaceFirstChar { it.uppercaseChar() }
 
     /** flatc's `create<Name>Vector` doesn't get the keyword suffix: `when` gives `createWhenVector`. */
-    private fun FieldDef.vectorName() = camelName().replaceFirstChar { it.uppercaseChar() }
+    private fun FieldDef.vectorName() = FlatcNames.camel(name).replaceFirstChar { it.uppercaseChar() }
 
     /** Field names never contain `_` after camel-casing (bar a keyword suffix), so this can't clash. */
     private fun offsetVal(field: FieldDef) = "o_${field.kotlinName()}"
-
-    private fun FbsTypeName.toClassName() = ClassName(packageName, simpleName)
-
-    private fun ClassName.companion() = nestedClass("Companion")
 
     private fun List<CodeBlock>.joinToCode(): CodeBlock = CodeBlock.builder().apply {
         forEachIndexed { i, block -> if (i > 0) add(", "); add(block) }

@@ -116,4 +116,33 @@ class TableBuilderGeneratorTest {
         assertThat(code).doesNotContain("fun Msg.Companion.build(")
         assertThat(code).doesNotContain("copyInto")
     }
+
+    @Test
+    fun `struct fields are written inline, right before their add call`() {
+        val vec2 = FbsTypeName(pkg, "Vec2")
+        val code = generate(
+            table(
+                field("origin", FieldKind.Struct(vec2)),
+                field("pose", FieldKind.Struct(FbsTypeName(pkg, "Pose")), required = true),
+            )
+        )
+
+        assertThat(code).contains("origin: Vec2? = null")
+        assertThat(code).contains("pose: Pose,")
+        assertThat(code).contains("origin?.let { Msg.addOrigin(builder, it.copyInto(builder)) }")
+        assertThat(code).contains("Msg.addPose(builder, pose.copyInto(builder))")
+        // Nothing for structs is written before the table starts.
+        assertThat(code.substringBefore("Msg.startMsg(builder)")).doesNotContain("copyInto")
+    }
+
+    @Test
+    fun `vectors of structs are written last-first between start and end vector`() {
+        val code = generate(table(field("path", FieldKind.StructVector(FbsTypeName(pkg, "Vec2")))))
+
+        assertThat(code).contains(
+            "Msg.startPathVector(builder, it.size); it.asReversed().forEach { s ->"
+        )
+        assertThat(code).contains("builder.endVector()")
+        assertThat(code).contains("List(this.pathLength) { this.path(it)!! }")
+    }
 }

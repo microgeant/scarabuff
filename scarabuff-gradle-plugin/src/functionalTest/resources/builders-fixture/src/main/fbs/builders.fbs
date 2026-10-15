@@ -8,6 +8,20 @@ enum Level:ubyte { Low, High }
 
 table Inner { v:int; label:string; }
 
+struct Vec2 { x:float; y:float; }
+// Nested struct, enum and bool inside a struct.
+struct Pose { position:Vec2; angle:double; color:Color; visible:bool; }
+// Keyword field names: flatc's accessors become in_ and is_.
+struct Bounds { in:int; is:int; }
+
+table Shapes {
+  origin:Vec2;
+  pose:Pose (required);
+  path:[Vec2];
+  other_ns:com.probe.common.Point;
+  bounds:Bounds;
+}
+
 table All {
   a_bool:bool = true;
   a_byte:byte = -2;
