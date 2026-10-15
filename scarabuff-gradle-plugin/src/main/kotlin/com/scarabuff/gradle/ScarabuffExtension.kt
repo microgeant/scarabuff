@@ -3,7 +3,6 @@ package com.scarabuff.gradle
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.model.ObjectFactory
 import org.gradle.api.provider.Property
-import org.gradle.api.provider.ProviderFactory
 import javax.inject.Inject
 
 /**
@@ -11,7 +10,6 @@ import javax.inject.Inject
  */
 abstract class ScarabuffExtension @Inject constructor(
     objects: ObjectFactory,
-    providers: ProviderFactory,
 ) {
     /** Directory containing `.fbs` schemas. Defaults to `src/main/fbs`. */
     val schemaDir: DirectoryProperty = objects.directoryProperty()
@@ -20,12 +18,33 @@ abstract class ScarabuffExtension @Inject constructor(
     val outputDir: DirectoryProperty = objects.directoryProperty()
 
     /**
-     * Path to (or name on `$PATH` of) the `flatc` executable. Defaults to the `$FLATC`
-     * environment variable set by this project's `flake.nix` devShell, falling back to `flatc`
-     * on `$PATH` when not running inside that shell.
+     * FlatBuffers version of the flatc that scarabuff downloads, verifies and caches. Defaults to
+     * the version of `com.google.flatbuffers:flatbuffers-java` on the compile classpath, so the
+     * compiler always matches the runtime. Ignored when [flatc] or `$FLATC` is set.
+     */
+    val flatcVersion: Property<String> = objects.property(String::class.java)
+
+    /**
+     * Path to (or name on `$PATH` of) a flatc executable to use instead of the managed one.
+     * Defaults to the `$FLATC` environment variable, when set.
      */
     val flatc: Property<String> = objects.property(String::class.java)
-        .convention(providers.environmentVariable("FLATC").orElse("flatc"))
+
+    /**
+     * Adds the libraries the generated code compiles against (flatbuffers-java,
+     * flatbuffers-java-grpc, grpc-stub, grpc-kotlin-stub, kotlinx-coroutines-core) to `api`, at
+     * the versions scarabuff is tested with. Defaults to `true`. Your own declarations still win
+     * if they're newer; set to `false` to manage all of them yourself. A gRPC transport
+     * (`grpc-netty-shaded`, `grpc-okhttp`, ...) is never added: that choice depends on the platform.
+     */
+    val addRuntimeDependencies: Property<Boolean> = objects.property(Boolean::class.java).convention(true)
+
+    /**
+     * Generates `<Table>Builders.kt` for every table: `build(...)`, `buildBytes(...)` and
+     * `fromBytes(...)` extension functions (plus `pack`/`copyInto` for composing messages by hand).
+     * Defaults to `true`.
+     */
+    val generateBuilders: Property<Boolean> = objects.property(Boolean::class.java).convention(true)
 
     /**
      * Appended to each schema's `namespace` to form the package generated `<Service>GrpcKt.kt`

@@ -8,29 +8,96 @@ enum class StreamingKind(val attributeValue: String?) {
     BIDI("bidi");
 
     companion object {
+        /** `streaming: "none"` is flatc's explicit spelling of unary. */
         fun fromAttribute(value: String?): StreamingKind =
-            entries.firstOrNull { it.attributeValue == value }
+            entries.firstOrNull { it.attributeValue == (value.takeUnless { it == "none" }) }
                 ?: throw IllegalArgumentException("Unknown streaming attribute: \"$value\"")
+    }
+}
+
+/**
+ * A table referenced by an RPC. [packageName] is the table's FlatBuffers namespace, which is also
+ * the package flatc's `--kotlin` output puts its class in. Empty for a schema with no namespace.
+ */
+data class FbsTypeName(
+    val packageName: String,
+    val simpleName: String,
+) {
+    companion object {
+        /** Splits a fully qualified FlatBuffers name like `com.example.Ping`. */
+        fun fromQualified(qualifiedName: String): FbsTypeName = FbsTypeName(
+            packageName = qualifiedName.substringBeforeLast('.', missingDelimiterValue = ""),
+            simpleName = qualifiedName.substringAfterLast('.'),
+        )
     }
 }
 
 data class RpcMethod(
     val name: String,
-    val requestType: String,
-    val responseType: String,
+    val requestType: FbsTypeName,
+    val responseType: FbsTypeName,
     val streaming: StreamingKind,
 )
 
 data class RpcServiceDef(
+    /** The service's FlatBuffers namespace; empty for a schema with no namespace. */
+    val namespace: String,
     val name: String,
     val methods: List<RpcMethod>,
+) {
+    /** The gRPC service name on the wire, e.g. `com.example.EchoService`. */
+    val qualifiedName: String get() = if (namespace.isEmpty()) name else "$namespace.$name"
+}
+
+/** A FlatBuffers scalar, with the Kotlin types flatc's `--kotlin` output uses for it. */
+enum class ScalarType(val kotlinType: String, val arrayType: String) {
+    BOOL("Boolean", "BooleanArray"),
+    BYTE("Byte", "ByteArray"),
+    UBYTE("UByte", "UByteArray"),
+    SHORT("Short", "ShortArray"),
+    USHORT("UShort", "UShortArray"),
+    INT("Int", "IntArray"),
+    UINT("UInt", "UIntArray"),
+    LONG("Long", "LongArray"),
+    ULONG("ULong", "ULongArray"),
+    FLOAT("Float", "FloatArray"),
+    DOUBLE("Double", "DoubleArray"),
+}
+
+/** What a table field holds, limited to the kinds scarabuff can generate builders for. */
+sealed interface FieldKind {
+    /** A scalar, or an enum stored as its underlying scalar ([enumType] is then set). */
+    data class Scalar(val type: ScalarType, val enumType: FbsTypeName? = null) : FieldKind
+    data object Str : FieldKind
+    data class Table(val type: FbsTypeName) : FieldKind
+    data class ScalarVector(val element: Scalar) : FieldKind
+    data object StrVector : FieldKind
+    data class TableVector(val element: FbsTypeName) : FieldKind
+}
+
+data class FieldDef(
+    /** The name as written in the schema, e.g. `created_at`. */
+    val name: String,
+    /** The field's slot in the table's vtable (its `id`). */
+    val id: Int,
+    val kind: FieldKind,
+    val required: Boolean,
+    /** A scalar declared `= null`: absent unless set, rather than defaulted. */
+    val optionalScalar: Boolean,
+    /** The schema default as a Kotlin literal (`42`, `1.5f`, `9u`, ...); null for non-scalars. */
+    val defaultValue: String?,
+    /** For an enum field whose default matches one of its values, that value's name. */
+    val defaultEnumValue: String? = null,
 )
 
 /**
- * The subset of a parsed `.fbs` file scarabuff needs: its namespace (used to resolve the
- * Java/Kotlin package flatc will emit types into) and any `rpc_service` definitions found in it.
+ * A table from the compiled schemas. [unsupportedReason] is set when it has a field kind the
+ * builder generator doesn't handle yet; such tables still get `fromBytes`, but no builders.
  */
-data class FbsFile(
-    val namespace: String,
-    val services: List<RpcServiceDef>,
+data class TableDef(
+    val type: FbsTypeName,
+    val fields: List<FieldDef>,
+    /** Set when this table is the schema's `root_type` and the schema declares a `file_identifier`. */
+    val fileIdentifier: String?,
+    val unsupportedReason: String?,
 )
