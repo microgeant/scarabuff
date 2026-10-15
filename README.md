@@ -39,6 +39,39 @@ rpc_service ClipAudioService {
 }
 ```
 
+## When to use scarabuff
+
+gRPC's default message format is Protocol Buffers, and Google's
+[grpc-kotlin](https://github.com/grpc/grpc-kotlin) only generates Kotlin coroutine stubs for
+Protocol Buffers. flatc can generate gRPC code for FlatBuffers in several languages, but not
+Kotlin. scarabuff is for the space in between: **Kotlin projects that use gRPC with FlatBuffers as
+the message format**.
+
+It's a good fit when FlatBuffers itself is the right choice:
+
+- **Large messages you only partly read.** FlatBuffers messages are read in place, with no parsing
+  step, so reading one field costs the same however big the message is.
+- **Low allocation.** No parsed object tree means less garbage-collector work, which matters on
+  Android and in games, AR or audio, where a GC pause shows up as stutter.
+- **Binary payloads** such as audio or image buffers, read directly from the received bytes.
+- **A schema shared with native code.** The same `.fbs` works from C++, Rust and Swift.
+- **High-rate streams** of small structured messages, like sensor data or poses, over gRPC
+  streaming with coroutines.
+
+For an ordinary request/response API without those needs, Protocol Buffers with grpc-kotlin is
+usually the simpler choice:
+
+- **Tooling:** `grpcurl`, Postman, server reflection, gRPC-Web and HTTP/JSON transcoding all
+  assume Protocol Buffers, and none of them work with FlatBuffers.
+- **Ergonomics:** FlatBuffers messages are read-only views over bytes, with nullable accessors and
+  [lifetime rules](#working-with-messages); Protocol Buffers gives you ordinary objects.
+- **Size:** FlatBuffers messages are often larger on the wire, trading compactness for
+  zero-copy reads.
+
+scarabuff's current limits: JVM and Android only, with the schema in a Kotlin/JVM module (see
+[Android](#android)). Generated builders don't support structs or unions yet (see
+[Building messages](#building-messages)).
+
 ## Quick start
 
 **1. Apply the plugin** (published on the
