@@ -65,7 +65,7 @@ class TableBuilderGeneratorTest {
     fun `required fields are non-null parameters without defaults`() {
         val code = generateFlat(table(field("name", FieldKind.Str, required = true)))
 
-        assertThat(code).contains("fun Msg.Companion.build(name: String, builder: FlatBufferBuilder = FlatBufferBuilder()): Msg")
+        assertThat(code).contains("fun Msg.Companion.build(name: String, builder: FlatBufferBuilder = FlatBufferBuilder(Msg.sizeHint(name = name) + 18)): Msg")
         assertThat(code).contains("val o_name = name.let { builder.createString(it) }")
         assertThat(code).contains("Msg.addName(builder, o_name)")
     }
@@ -184,11 +184,11 @@ class TableBuilderGeneratorTest {
         val code = generateFlat(table(field("x", FieldKind.Scalar(ScalarType.INT))))
 
         assertThat(code).contains(
-            "fun Msg.Companion.buildBytes(x: Int = 0, builder: FlatBufferBuilder = FlatBufferBuilder()): ByteArray { builder.clear()"
+            "fun Msg.Companion.buildBytes(x: Int = 0, builder: FlatBufferBuilder = FlatBufferBuilder(Msg.sizeHint() + 18)): ByteArray { builder.clear()"
         )
-        assertThat(code).contains("fun Msg.Companion.build(x: Int = 0, builder: FlatBufferBuilder = FlatBufferBuilder()): Msg { builder.clear()")
+        assertThat(code).contains("fun Msg.Companion.build(x: Int = 0, builder: FlatBufferBuilder = FlatBufferBuilder(Msg.sizeHint() + 18)): Msg { builder.clear()")
         // The spec forwards its builder.
-        assertThat(code).contains("public fun buildBytes(builder: FlatBufferBuilder = FlatBufferBuilder()): ByteArray = Msg.buildBytes(x = x, builder = builder)")
+        assertThat(code).contains("public fun buildBytes(builder: FlatBufferBuilder = FlatBufferBuilder(sizeHint() + 18)): ByteArray = Msg.buildBytes(x = x, builder = builder)")
     }
 
     @Test
@@ -202,13 +202,12 @@ class TableBuilderGeneratorTest {
             access,
         ).toString().replace(Regex("""\s+"""), " ")
 
-        // Optional: a presence check first, since flatc's titleAsByteBuffer throws when it's absent.
-        assertThat(code).contains("public fun Msg.titleEquals(`value`: String?): Boolean {")
-        assertThat(code).contains("if (!${access.simpleName}.isPresent(this, 8)) return value == null")
-        assertThat(code).contains("return value != null && scarabuffUtf8Equals(titleAsByteBuffer, value)")
-        // Required: always present.
-        assertThat(code).contains("public fun Msg.nameEquals(`value`: String?): Boolean = value != null && scarabuffUtf8Equals(nameAsByteBuffer, value)")
-        assertThat(code).contains("private fun scarabuffUtf8Equals(bytes: ByteBuffer, `value`: String): Boolean")
+        // The comparison runs in the access object, straight on the buffer; vtable slot = 4 + 2 * id.
+        assertThat(code).contains("public fun Msg.titleEquals(`value`: String?): Boolean = ${access.simpleName}.stringEquals(this, 8, value)")
+        assertThat(code).contains("public fun Msg.nameEquals(`value`: String?): Boolean = ${access.simpleName}.stringEquals(this, 10, value)")
+        // No slice, and no per-file helper any more.
+        assertThat(code).doesNotContain("AsByteBuffer")
+        assertThat(code).doesNotContain("scarabuffUtf8Equals")
     }
 
     @Test
@@ -221,5 +220,38 @@ class TableBuilderGeneratorTest {
         assertThat(access).isNotEqualTo(FieldAccessGenerator.className(listOf("com.c")))
         assertThat(code).contains("internal object ${access.simpleName}")
         assertThat(code).contains("table.__offset(vtableOffset) != 0")
+        // String equality reads the buffer directly, through Table's package-visible members.
+        val flat = code.replace(Regex("""\s+"""), " ")
+        assertThat(flat).contains("public fun stringEquals( table: Table, vtableOffset: Int, `value`: String?, ): Boolean {")
+        assertThat(flat).contains("val start = table.__vector(o) val length = table.__vector_len(o)")
+    }
+
+    @Test
+    fun `builders start at an estimate of the message size, not a flat 1 KB`() {
+        val vec2 = FbsTypeName(pkg, "Vec2")
+        val item = FbsTypeName(pkg, "Item")
+        val itemTable = TableDef(item, listOf(field("name", FieldKind.Str, id = 0)), null, null)
+        val code = TableBuilderGenerator.generate(
+            table(
+                field("id", FieldKind.Scalar(ScalarType.LONG), id = 0),
+                field("title", FieldKind.Str, id = 1),
+                field("path", FieldKind.StructVector(vec2), id = 2),
+                field("items", FieldKind.TableVector(item), id = 3, required = true),
+            ),
+            tables = mapOf(item to itemTable),
+            structs = mapOf(vec2 to com.scarabuff.core.fbs.StructDef(vec2, emptyList(), byteSize = 8)),
+        ).toString().replace(Regex("""\s+"""), " ")
+
+        assertThat(code).contains("internal fun Msg.Companion.sizeHint( title: String?, path: List<Vec2Spec>?, items: List<ItemSpec>, ): Int {")
+        // Fixed part: vtable offset 4 + alignment 8 + the long 8 + three 4-byte offsets.
+        assertThat(code).contains("var _size = 32")
+        assertThat(code).contains("if (title != null) { _size += 8 + title.length }")
+        // Struct vectors use the struct's exact size; no per-item work.
+        assertThat(code).contains("if (path != null) { _size += 8 + 8 * path.size }")
+        // Table vectors: the first element's estimate times the count, plus the element's vtable once.
+        assertThat(code).contains("_size += 8 + 4 * items.size if (items.isNotEmpty()) { _size += items.size * items[0].sizeHint() + 6 }")
+        assertThat(code).contains("internal fun sizeHint(): Int = Msg.sizeHint(title = title, path = path, items = items)")
+        // Root overhead: this table's vtable (4 + 2 * 4 slots), root offset and alignment.
+        assertThat(code).contains("FlatBufferBuilder(Msg.sizeHint(title = title, path = path, items = items) + 24)")
     }
 }

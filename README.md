@@ -83,7 +83,7 @@ scarabuff's current limits: JVM and Android only, with the schema in a Kotlin/JV
 // build.gradle.kts
 plugins {
     kotlin("jvm") version "2.2.10"
-    id("io.github.microgeant.scarabuff") version "0.5.0"
+    id("io.github.microgeant.scarabuff") version "0.5.1"
 }
 ```
 
@@ -189,11 +189,11 @@ val again: Post = Post.fromBytes(bytes)
   every `Vec2Spec` property is required.
 - **Lists:** vectors take a `List` (`List<Int>`, `List<String>`, `List<UserSpec>`,
   `List<Vec2Spec>`, ...).
-- **Builder size and reuse:** `build`, `buildBytes` and the spec versions take an optional last
-  argument, `builder`, which is cleared first. By default each call allocates a 1 KB buffer. For
-  small messages, a presized `FlatBufferBuilder(256)` is about 30% faster. Reusing one builder with
-  `buildBytes`, which copies the bytes out, is about 40% faster and allocates a fraction of the
-  memory. Don't reuse a builder behind `build()`, though: see
+- **Builder size and reuse:** by default, `build` and `buildBytes` start the builder at an estimate
+  of the message's size, computed from the values you pass. That avoids both FlatBufferBuilder's
+  flat 1 KB for small messages and repeated growth for large ones. The optional last argument,
+  `builder`, replaces that: it's cleared first, and lets you reuse one builder with `buildBytes`,
+  which copies the bytes out. Reusing a builder behind `build()` is only safe in narrow cases: see
   [Working with messages](#working-with-messages).
 - **Lower level:** `Post.pack(builder, ...)` writes into a `FlatBufferBuilder` you own and returns
   the offset, and `post.copyInto(builder)` re-serializes an existing message into it. A struct's
@@ -241,11 +241,19 @@ access; it doesn't copy them out. With scarabuff's marshallers:
 
 - **Received messages** each get their own freshly allocated buffer, so they're safe to keep,
   pass between coroutines, and read later.
-- **Sent messages** are streamed straight from the table's backing array, without a copy. Don't
-  reuse or `clear()` a `FlatBufferBuilder`, or write to its buffer, until the call has sent the
-  message: a message from `build()`, including one built with your own `builder`, is a view over
-  that builder's buffer. To reuse a builder, build with `buildBytes(builder = ...)`, which copies
-  the bytes out, and send `fromBytes(bytes)`; or give each message its own presized builder.
+- **Sent messages** are streamed straight from the table's backing array, without a copy. A message
+  from `build()`, including one built with your own `builder`, is a view over that builder's
+  buffer. So don't reuse or `clear()` the builder, or write to its buffer, until gRPC has copied
+  the message out. In streams, the default is the simple choice: each message gets its own builder,
+  sized to it. Reusing one builder across streamed messages is safe only when both hold:
+  - each message is built inside the flow gRPC collects (`flow { emit(Msg.build(..., builder = b)) }`),
+    with nothing buffering between them: no `.buffer()`, `channelFlow`, `produceIn` or shared flows
+  - the transport is Netty or OkHttp, which copy each message as it's sent
+
+  The in-process transport doesn't copy, so reuse corrupts messages there, and in tests that use
+  it. This relies on grpc-java's behavior rather than a documented guarantee;
+  `StreamingBuilderReuseTest` in `example/` checks it on every build. To reuse a builder anywhere
+  else, use `buildBytes(builder = ...)`, which copies the bytes out, and send `fromBytes(bytes)`.
 - **Use heap buffers.** The marshaller needs `ByteBuffer.array()`, which a direct `ByteBuffer`
   doesn't have, so don't give `FlatBufferBuilder` a direct-buffer factory.
 - **Map at the edges.** Accessors decode on every call (each `.name` read builds a new `String`),
@@ -254,14 +262,18 @@ access; it doesn't copy them out. With scarabuff's marshallers:
   generated ones, or map to your own domain models.
 - **Reading strings.** Read a string field once and keep the value, rather than calling `.name`
   repeatedly. To compare one without decoding it, use the generated `nameEquals("Ada")`. It
-  compares UTF-8 bytes and allocates nothing: reading a field 5 times per item over 1000 items,
-  it takes about 28 µs and 0 bytes against 47 µs and 400 KB for `.name == "Ada"`. Beware of flatc's
-  own `nameAsByteBuffer`: it throws `NullPointerException` when an optional string is absent.
-  - To check presence without decoding, the helpers use a small generated `internal` object in the
-    `com.google.flatbuffers` package (`ScarabuffFieldAccess_<hash>`). That package can read
-    FlatBuffers' protected `__offset`, avoiding both reflection and a caught exception. It's fine
-    on Android and the normal JVM classpath; under the Java module system (JPMS) it would be a
-    split package.
+  compares UTF-8 bytes straight from the message buffer and allocates nothing.
+  - Measured with JMH, comparing a field 5 times per item over 1000 items: about 35 µs and 0 bytes,
+    against about 70 µs and 600 KB for `.name == "Ada"`.
+  - Protocol Buffers is still faster at this (about 3.5 µs), because it caches each decoded
+    string.
+  - Beware of flatc's own `nameAsByteBuffer`: it throws `NullPointerException` when an optional
+    string is absent.
+  - `nameEquals` runs in a small generated `internal` object in the `com.google.flatbuffers`
+    package (`ScarabuffFieldAccess_<hash>`). That package can use FlatBuffers' protected members,
+    `__offset` and the buffer itself, avoiding reflection, a caught exception and a `ByteBuffer`
+    slice per call. It's fine on Android and the normal JVM classpath; under the Java module system
+    (JPMS) it would be a split package.
 
 ## Performance
 
@@ -324,8 +336,11 @@ tables, and about 1.5× for struct vectors, where the remaining cost is the spec
   decode.
 - **Use narrower types,** such as `float` instead of `double` and `ushort` instead of `int`, where
   the range allows. That shrinks messages, which are larger than Protocol Buffers'.
-- **Presize or reuse builders** for small messages, which is about 30–40% faster (see
-  [Building messages](#building-messages)).
+- **Let the builders size themselves.** Since 0.5.1 they start at an estimate of each message's
+  size, which is most of what reusing a builder would gain, without the risks (see
+  [Working with messages](#working-with-messages)). For a streamed message, that brought allocation
+  from 2.9 KB to 2.0 KB (server stream) and from 6.1 KB to 4.3 KB (bidi), close to Protocol Buffers'
+  1.8 KB and 3.9 KB, at the same speed.
 - **Read each string field once,** or compare with `nameEquals` (see
   [Working with messages](#working-with-messages)).
 - **Read only what you need.** Partial reads are where FlatBuffers is far ahead. Convert to a spec
@@ -343,7 +358,7 @@ app:
 // api/build.gradle.kts
 plugins {
     kotlin("jvm")
-    id("io.github.microgeant.scarabuff") version "0.5.0"
+    id("io.github.microgeant.scarabuff") version "0.5.1"
 }
 
 // app/build.gradle.kts

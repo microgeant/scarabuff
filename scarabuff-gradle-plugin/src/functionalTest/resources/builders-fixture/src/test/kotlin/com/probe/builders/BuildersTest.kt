@@ -1,6 +1,7 @@
 package com.probe.builders
 
 import com.google.common.truth.Truth.assertThat
+import com.google.common.truth.Truth.assertWithMessage
 import com.google.flatbuffers.FlatBufferBuilder
 import com.probe.common.PointSpec
 import com.probe.common.SharedSpec
@@ -271,5 +272,27 @@ class BuildersTest {
         val strict = Strict.build(name = "required", inner = InnerSpec(v = 1), ids = listOf(1))
         assertThat(strict.nameEquals("required")).isTrue()
         assertThat(strict.nameEquals("other")).isFalse()
+    }
+
+    @Test
+    fun `size estimates cover the encoded message without overshooting`() {
+        val messages = listOf(
+            AllSpec(),
+            AllSpec(someText = "hello", vInt = List(100) { it }, vString = List(20) { "string-$it" }),
+            AllSpec(inner = InnerSpec(v = 1, label = "nested"), vInner = List(50) { InnerSpec(v = it, label = "item-$it") }),
+            NumPayloadSpec(id = 1, items = List(1000) { NumItemSpec(it.toLong(), it * 0.5, it % 2 == 0) }),
+            ShapesSpec(pose = PoseSpec(Vec2Spec(1f, 2f), 0.5, Color.Green, true), path = List(200) { Vec2Spec(it * 1f, 0f) }),
+        )
+        for (spec in messages) {
+            val (estimate, actual) = when (spec) {
+                is AllSpec -> spec.sizeHint() to spec.buildBytes().size
+                is NumPayloadSpec -> spec.sizeHint() to spec.buildBytes().size
+                is ShapesSpec -> spec.sizeHint() to spec.buildBytes().size
+                else -> error("unexpected")
+            }
+            // sizeHint leaves out the root's vtable and offset, a few dozen bytes added separately.
+            assertWithMessage("estimate for $spec").that(estimate + 64).isAtLeast(actual)
+            assertWithMessage("estimate for $spec").that(estimate).isAtMost(actual * 2 + 64)
+        }
     }
 }

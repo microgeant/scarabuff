@@ -17,6 +17,7 @@ class StructBuilderGeneratorTest {
     private val vec2 = StructDef(
         FbsTypeName("com.example", "Vec2"),
         listOf(StructFieldDef("x", FieldKind.Scalar(ScalarType.FLOAT)), StructFieldDef("y", FieldKind.Scalar(ScalarType.FLOAT))),
+        byteSize = 8,
     )
     private val pose = StructDef(
         FbsTypeName("com.example", "Pose"),
@@ -24,6 +25,7 @@ class StructBuilderGeneratorTest {
             StructFieldDef("position", FieldKind.Struct(vec2.type)),
             StructFieldDef("is", FieldKind.Scalar(ScalarType.BOOL)),
         ),
+        byteSize = 12,
     )
     private val structs = listOf(vec2, pose).associateBy { it.type }
 
@@ -64,6 +66,7 @@ class StructBuilderGeneratorTest {
         val other = StructDef(
             FbsTypeName("com.other", "Wrapper"),
             listOf(StructFieldDef("inner", FieldKind.Struct(vec2.type))),
+            byteSize = 8,
         )
 
         val code = StructBuilderGenerator.generate(other, structs + (other.type to other)).toString()
