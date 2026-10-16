@@ -84,7 +84,7 @@ see [Android](#android)), as the generated code uses Java libraries. Generated b
 // build.gradle.kts
 plugins {
     kotlin("jvm") version "2.2.10" // or com.android.library / com.android.application
-    id("io.github.microgeant.scarabuff") version "0.5.1"
+    id("io.github.microgeant.scarabuff") version "0.6.0"
 }
 ```
 

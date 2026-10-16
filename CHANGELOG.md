@@ -4,7 +4,7 @@ All notable changes to scarabuff. The format follows [Keep a Changelog](https://
 and versions follow the policy in the README's [Versioning](README.md#versioning) section: before
 1.0, a minor release (0.x.0) may break things, and always says so here first, with how to migrate.
 
-## [Unreleased]
+## [0.6.0] - 2026-10-16
 
 ### Breaking
 
@@ -17,16 +17,18 @@ and versions follow the policy in the README's [Versioning](README.md#versioning
 
 ### Added
 
-- **`<Name>Spec.Vector`, vectors without an object per element,** for structs and tables:
-  `NumItemSpec.Vector(n) { i -> put(ids[i], scores[i], flags[i]) }`, or
-  `ItemSpec.Vector(n) { i -> put(id = ids[i], name = names[i]) }`. It's a `List` of specs, so it
-  goes wherever one does, and table builders write its elements straight into the buffer. A
-  struct's `put` takes nested structs' fields flattened; a table's takes the same arguments as
-  `build`. Measured with JMH, encoding 1000 elements:
-  - structs: 4.8 µs and 48 KB, against 8.5 µs and 84 KB for a list of specs, and 4.6 µs and
-    48 KB for hand-written flatc code;
-  - tables: 24% less allocation than a list of specs (143 KB against 187 KB), at the same speed
-    (52–54 µs).
+- **Android modules:** the plugin can be applied directly to an Android library or app module,
+  alongside the Android Gradle plugin, with AGP 9's built-in Kotlin or the Kotlin Android plugin.
+  Each variant gets a `generate<Variant>ScarabuffSources` task, registered through AGP's variant
+  API, so the IDE sees the generated sources. The runtime libraries go to `api` in a library and
+  `implementation` in an app. Tested with AGP 8.13 (library) and 9.0 (app). A separate Kotlin/JVM
+  schema module still works, and remains the way to share a schema with a server.
+- **Builders for unions of tables.** `union Payload { Inner, Other }` gets a `PayloadSpec`
+  interface that `InnerSpec` and `OtherSpec` implement, so a union field takes a member's spec
+  directly, and the builder writes the type tag. `toSpec()` reads the member back, and
+  `missingRequiredField()` checks it. Tables with union fields, and tables nesting them, now get
+  builders. Still unsupported: vectors of unions, unions with struct or string members, and
+  unions that list a table twice.
 - **Servers reject requests missing a required field with `INVALID_ARGUMENT`,** naming the field
   by its path through nested tables: `Order is missing required field items[1].sku`. The check
   runs before the implementation sees the request, and for every call shape; streams fail at the
@@ -36,30 +38,24 @@ and versions follow the policy in the README's [Versioning](README.md#versioning
 - **`missingRequiredField()` on every table:** the path of the first missing required field, or
   null. Use it on responses, or on bytes from `fromBytes`. It reads presence without decoding
   anything.
-
+- **`<Name>Spec.Vector`, vectors without an object per element,** for structs and tables:
+  `NumItemSpec.Vector(n) { i -> put(ids[i], scores[i], flags[i]) }`, or
+  `ItemSpec.Vector(n) { i -> put(id = ids[i], name = names[i]) }`. It's a `List` of specs, so it
+  goes wherever one does, and table builders write its elements straight into the buffer. A
+  struct's `put` takes nested structs' fields flattened; a table's takes the same arguments as
+  `build`. Encoding 1000 elements, measured with `benchmark/`:
+  - structs: 4.7 µs and 48 KB, against 8.0 µs and 84 KB for a list of specs, 4.4 µs and 48 KB
+    for hand-written flatc code, and 12.1 µs for Protocol Buffers;
+  - tables: 143 KB against 187 KB for a list of specs, and 44 µs against 48 µs.
 - **FlatBuffers 24.3.25 support,** next to 25.2.10: `scarabuff { flatbuffersVersion.set("24.3.25") }`
   switches both the `flatbuffers-java` the plugin adds and the `flatc` it installs. The new
   `flatbuffersVersion` setting replaces pinning the runtime jar, which conflicted with the
   version the plugin adds. 25.2.10 stays the default: FlatBuffers has released newer `flatc`
   versions, but no `flatbuffers-java` to match them.
-
-- **Builders for unions of tables.** `union Payload { Inner, Other }` gets a `PayloadSpec`
-  interface that `InnerSpec` and `OtherSpec` implement, so a union field takes a member's spec
-  directly, and the builder writes the type tag. `toSpec()` reads the member back, and
-  `missingRequiredField()` checks it. Tables with union fields, and tables nesting them, now get
-  builders. Still unsupported: vectors of unions, unions with struct or string members, and
-  unions that list a table twice.
-
-- **Android modules:** the plugin can be applied directly to an Android library or app module,
-  alongside the Android Gradle plugin, with AGP 9's built-in Kotlin or the Kotlin Android plugin.
-  Each variant gets a `generate<Variant>ScarabuffSources` task, registered through AGP's variant
-  API, so the IDE sees the generated sources. The runtime libraries go to `api` in a library and
-  `implementation` in an app. Tested with AGP 8.13 (library) and 9.0 (app). A separate Kotlin/JVM
-  schema module still works, and remains the way to share a schema with a server.
 - **Benchmarks in the repository:** `benchmark/` runs FlatBuffers against Protocol Buffers with JMH,
   built against the checkout next to it (`cd benchmark && ./gradlew jmh`). It covers encoding,
   decoding, the marshaller, unary RPCs, streaming, and gzip compression. The README's performance
-  numbers now come from it, and CI compiles it.
+  numbers now come from it, including a new section on when compression pays off. CI compiles it.
 
 ### Changed
 
@@ -202,6 +198,7 @@ and versions follow the policy in the README's [Versioning](README.md#versioning
   2026-10-14). It generates Kotlin coroutine gRPC stubs for all four call shapes from `.fbs`
   `rpc_service` definitions, as pure Kotlin. A standalone CLI is also included.
 
+[0.6.0]: https://github.com/microgeant/scarabuff/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/microgeant/scarabuff/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/microgeant/scarabuff/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/microgeant/scarabuff/compare/v0.3.0...v0.4.0
