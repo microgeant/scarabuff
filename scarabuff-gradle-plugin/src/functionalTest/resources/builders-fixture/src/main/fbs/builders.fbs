@@ -20,6 +20,7 @@ table Shapes {
   path:[Vec2];
   other_ns:com.probe.common.Point;
   bounds:Bounds;
+  poses:[Pose];
 }
 
 table All {

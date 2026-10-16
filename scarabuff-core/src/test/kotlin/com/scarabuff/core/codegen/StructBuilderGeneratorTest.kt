@@ -62,6 +62,47 @@ class StructBuilderGeneratorTest {
     }
 
     @Test
+    fun `Vector is a list of specs whose put writes the struct without a spec`() {
+        val code = generate(vec2).replace(Regex("""\s+"""), " ")
+
+        assertThat(code).contains("public class Vector( public override val size: Int, private val fill: Fill, ) : AbstractList<Vec2Spec>()")
+        assertThat(code).contains("public fun interface Fill {")
+        assertThat(code).contains("public fun Writer.write(index: Int)")
+        assertThat(code).contains("public fun put(x: Float, y: Float)")
+        assertThat(code).contains("Vec2.createVec2(_builder, x, y)")
+        assertThat(code).contains("_last = Vec2Spec(x, y)")
+        // Specs are only made when the list is read; writing goes through one Writer.
+        assertThat(code).contains("for (i in specs.size - 1 downTo 0) specs.write(_writer, i)")
+        assertThat(code).contains("for (i in specs.size - 1 downTo 0) specs[i].writeTo(builder)")
+    }
+
+    @Test
+    fun `Vector's put flattens nested structs, named by their path`() {
+        val code = generate(pose).replace(Regex("""\s+"""), " ")
+
+        assertThat(code).contains("public fun put( positionX: Float, positionY: Float, is_: Boolean, )")
+        assertThat(code).contains("Pose.createPose(_builder, positionX, positionY, is_)")
+        assertThat(code).contains("_last = PoseSpec(Vec2Spec(positionX, positionY), is_)")
+    }
+
+    @Test
+    fun `Vector's flattened names fall back to underscores when camel case would clash`() {
+        val clashing = StructDef(
+            FbsTypeName("com.example", "Clash"),
+            listOf(
+                StructFieldDef("position", FieldKind.Struct(vec2.type)),
+                StructFieldDef("position_x", FieldKind.Scalar(ScalarType.FLOAT)),
+            ),
+            byteSize = 12,
+        )
+
+        val code = StructBuilderGenerator.generate(clashing, structs + (clashing.type to clashing)).toString()
+            .replace(Regex("""\s+"""), " ")
+
+        assertThat(code).contains("public fun put( position_x: Float, position_y: Float, positionX: Float, )")
+    }
+
+    @Test
     fun `nested structs from another namespace import that namespace's toSpec`() {
         val other = StructDef(
             FbsTypeName("com.other", "Wrapper"),

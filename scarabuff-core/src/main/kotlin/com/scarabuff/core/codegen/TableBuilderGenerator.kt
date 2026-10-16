@@ -221,10 +221,11 @@ object TableBuilderGenerator {
                     "%T.create%LVector(builder, IntArray(it.size)·{·i·-> it[i].writeTo(builder) })",
                     tableClass, field.vectorName(),
                 )
-                // flatc has no create<Field>Vector for structs: they're written in place, last first.
+                // flatc has no create<Field>Vector for structs: they're written in place, last first,
+                // by the struct's generated Vector, without a spec per element when given one.
                 is FieldKind.StructVector -> CodeBlock.of(
-                    "%T.start%LVector(builder, it.size); it.asReversed().forEach·{·s·-> s.writeTo(builder) }; builder.endVector()",
-                    tableClass, field.vectorName(),
+                    "%T.start%LVector(builder, it.size); %T.writeElements(builder, it); builder.endVector()",
+                    tableClass, field.vectorName(), StructBuilderGenerator.vectorClassName(kind.element),
                 )
             }
             if (field.required) {

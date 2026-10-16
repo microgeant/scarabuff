@@ -144,12 +144,12 @@ class TableBuilderGeneratorTest {
     }
 
     @Test
-    fun `vectors of structs are written last-first between start and end vector`() {
+    fun `vectors of structs are written between start and end vector by the struct's Vector`() {
         val code = generateFlat(table(field("path", FieldKind.StructVector(FbsTypeName(pkg, "Vec2")))))
 
         assertThat(code).contains("path: List<Vec2Spec>? = null")
         assertThat(code).contains("Msg.startPathVector(builder, it.size);")
-        assertThat(code).contains("it.asReversed().forEach { s -> s.writeTo(builder) }")
+        assertThat(code).contains("Vec2Spec.Vector.writeElements(builder, it); builder.endVector()")
         assertThat(code).contains("builder.endVector()")
         assertThat(code).contains("List(this.pathLength) { this.path(it)!!.toSpec() }")
     }
