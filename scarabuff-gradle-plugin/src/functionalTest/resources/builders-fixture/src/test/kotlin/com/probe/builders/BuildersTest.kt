@@ -351,14 +351,6 @@ class BuildersTest {
         assertThat(Empty.fromBytes(Empty.buildBytes())).isNotNull()
     }
 
-    @Suppress("DEPRECATION")
-    @Test
-    fun `the deprecated struct build still works for one release`() {
-        val pose = Pose.build(position = Vec2.build(x = 1f, y = 2f), angle = 0.5, color = Color.Red, visible = true)
-
-        assertThat(pose.toSpec()).isEqualTo(PoseSpec(Vec2Spec(1f, 2f), 0.5, Color.Red, true))
-    }
-
     @Test
     fun `a presized or reused builder can be passed in`() {
         val reused = FlatBufferBuilder(64)

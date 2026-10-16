@@ -39,8 +39,7 @@ abstract class ScarabuffExtension @Inject constructor(
     val flatc: Property<String> = objects.property(String::class.java)
 
     /**
-     * Adds the libraries the generated code compiles against (flatbuffers-java,
-     * flatbuffers-java-grpc, grpc-stub, grpc-kotlin-stub, kotlinx-coroutines-core) to `api`, at
+     * Adds the libraries the generated code compiles against (flatbuffers-java, grpc-stub, grpc-kotlin-stub, kotlinx-coroutines-core) to `api`, at
      * the versions scarabuff is tested with (flatbuffers-java at [flatbuffersVersion]). Defaults to `true`. Your own declarations still win
      * if they're newer; set to `false` to manage all of them yourself. A gRPC transport
      * (`grpc-netty-shaded`, `grpc-okhttp`, ...) is never added: that choice depends on the platform.

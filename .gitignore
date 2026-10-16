@@ -8,6 +8,8 @@ local.properties
 generated/
 example/.gradle/
 example/build/
+benchmark/.gradle/
+benchmark/build/
 .direnv/
 result
 result-*

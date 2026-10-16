@@ -173,7 +173,7 @@ class OrchestratorTest {
         )
         assertThat(user).contains("fun User.Companion.fromBytes(bytes: ByteArray): User")
         val vec2 = generated("com.probe.msgs.Vec2Builders")
-        assertThat(vec2).contains("fun Vec2.Companion.build(x: Float, y: Float): Vec2")
+        assertThat(vec2).contains("data class Vec2Spec(")
         assertThat(vec2).contains("fun Vec2.copyInto(builder: FlatBufferBuilder): Int")
     }
 

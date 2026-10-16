@@ -23,8 +23,7 @@ dependencies {
 // The runtime libraries the plugin adds to consuming projects (see ScarabuffPlugin), written from
 // the version catalog so the plugin always adds exactly the versions this repo builds and tests.
 val runtimeDependencies: List<String> = listOf(
-    libs.flatbuffers.java.asProvider(),
-    libs.flatbuffers.java.grpc,
+    libs.flatbuffers.java,
     libs.grpc.stub,
     libs.grpc.kotlin.stub,
     libs.kotlinx.coroutines.core,

@@ -7,7 +7,6 @@ plugins {
 // intentionally standalone (composite-built via `includeBuild("..")`, see settings.gradle.kts)
 // so it doesn't share that catalog directly.
 val flatbuffersJavaVersion = "25.2.10"
-val flatbuffersJavaGrpcVersion = "2.0.3"
 val grpcVersion = "1.70.0"
 val grpcKotlinVersion = "1.2.1"
 val coroutinesVersion = "1.7.3"
@@ -22,7 +21,6 @@ kotlin {
 
 dependencies {
     implementation("com.google.flatbuffers:flatbuffers-java:$flatbuffersJavaVersion")
-    implementation("com.google.flatbuffers:flatbuffers-java-grpc:$flatbuffersJavaGrpcVersion")
     implementation("io.grpc:grpc-stub:$grpcVersion")
     implementation("io.grpc:grpc-netty:$grpcVersion")
     implementation("io.grpc:grpc-kotlin-stub:$grpcKotlinVersion")

@@ -100,7 +100,7 @@ class ScarabuffPluginFunctionalTest {
         assertThat(testCount("com.scarabuff.example.StreamingBuilderReuseTest")).isEqualTo(3)
         assertThat(testCount("com.scarabuff.example.RequiredFieldsTest")).isEqualTo(4)
         assertThat(testCount("com.scarabuff.example.MarshallerTest")).isEqualTo(3)
-        assertThat(testCount("com.probe.builders.BuildersTest")).isEqualTo(23)
+        assertThat(testCount("com.probe.builders.BuildersTest")).isEqualTo(22)
 
         val second = runner(gradleVersion, "test", "--configuration-cache").build()
         assertThat(second.output).contains("Configuration cache entry reused")
@@ -135,7 +135,7 @@ class ScarabuffPluginFunctionalTest {
         assertThat(generated).contains("Constants.FLATBUFFERS_24_3_25()")
         assertThat(testCount("com.scarabuff.example.EchoRoundTripTest")).isEqualTo(5)
         assertThat(testCount("com.scarabuff.example.RequiredFieldsTest")).isEqualTo(4)
-        assertThat(testCount("com.probe.builders.BuildersTest")).isEqualTo(23)
+        assertThat(testCount("com.probe.builders.BuildersTest")).isEqualTo(22)
     }
 
     @Test

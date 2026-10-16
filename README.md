@@ -56,7 +56,8 @@ It's a good fit when FlatBuffers itself is the right choice:
 - **Binary payloads** such as audio or image buffers, read directly from the received bytes.
 - **A schema shared with native code.** The same `.fbs` works from C++, Rust and Swift.
 - **Numeric data as structs,** like sensor readings or poses: decoding a vector of structs is
-  about 11× faster than Protocol Buffers, and allocates almost nothing.
+  about 9× faster than Protocol Buffers and allocates almost nothing, and encoding one is about
+  2.5× faster.
 
 For an ordinary request/response API without those needs, Protocol Buffers with grpc-kotlin is
 usually the simpler choice:
@@ -88,7 +89,7 @@ plugins {
 ```
 
 **2. Add a gRPC transport.** The plugin adds everything the generated code compiles against
-(flatbuffers-java, flatbuffers-java-grpc, grpc-stub, grpc-kotlin-stub, kotlinx-coroutines-core)
+(flatbuffers-java, grpc-stub, grpc-kotlin-stub, kotlinx-coroutines-core)
 at the versions it's tested with. The transport is up to you:
 
 ```kotlin
@@ -241,8 +242,8 @@ In 0.4, nested values were finished messages (`author = User.build(...)`), and e
 a buffer of its own, then decoded and written again into the parent. Pass specs instead
 (`author = UserSpec(...)`), or `received.toSpec()` for a message you already have. For a 1000-item
 list, that makes building the message about 3x faster with about 5x less allocation, and about 9x
-faster with about 11x less allocation for a list of structs. `Vec2.build(...)` still works in
-this release, marked deprecated; use `Vec2Spec(...)`.
+faster with about 11x less allocation for a list of structs. Structs are specs too:
+`Vec2Spec(...)`, not `Vec2.build(...)`, which 0.5 deprecated and 0.6 removed.
 
 ## Working with messages
 
@@ -319,64 +320,82 @@ access; it doesn't copy them out. With scarabuff's marshallers:
 
 ### FlatBuffers vs Protocol Buffers
 
-These numbers come from an external JMH benchmark run by a scarabuff user, and aren't in this
-repository. Setup:
-- JMH 1.37 on JDK 21 on an Apple-silicon Mac (one fork, 5 × 1 s iterations).
-- FlatBuffers via scarabuff 0.4.0 against protobuf-java 3.25.5 with grpc-kotlin, with the same
-  data on both sides.
-- The payload is an id, a title and N items of `{id, name, score, active}`.
+Measured with this repository's [`benchmark/`](benchmark) (see [Development](#development) to run
+it), against scarabuff 0.6.0 as developed:
+- JMH 1.37 on JDK 17, on an Apple M5 Mac: one fork, 3 warm-up and 5 one-second iterations.
+- FlatBuffers through scarabuff's generated code (hand-written flatc code where noted), against
+  protobuf-java 3.25.5. Both use grpc-java 1.70 over Netty, with the same data on both sides.
+- The payload is an id, a title and N items of `{id, name, score, active}`. The numeric variant
+  has items of `{id, score, active}`: a struct vector in FlatBuffers, a repeated message in
+  Protocol Buffers.
 
-Treat differences under about 20% as noise.
+Times are per operation, and allocation is bytes allocated per operation. Allocation is exact.
+Times vary by up to about 20% between runs, so treat smaller differences as ties. Results are for
+1000 items unless noted.
 
 **Where FlatBuffers wins:**
 
 | Operation | FlatBuffers | Protocol Buffers |
 |---|---|---|
-| Read a few fields of a 1000-item message | ~2 ns, 0 B | 30 µs, 181 KB (it must parse first) |
-| Decode a 1000-item vector of numeric structs | 1.04 µs, 88 B | 11.5 µs, 61 KB |
-| Read every field of a table message | ~10% faster, ~35% less allocation | |
-| Marshaller round trip | 15–35% faster | |
-| Unary RPC, 8 threads, 1000 items (one run, indicative) | 186 µs, 73 KB | 244 µs, 201 KB |
+| Read two fields of a message | 0.004 µs, 56 B | 28.8 µs, 181 KB (it must parse first) |
+| Decode a vector of numeric structs | 1.13 µs, 88 B | 10.3 µs, 61 KB |
+| Encode a vector of numeric structs (`NumItemSpec.Vector`) | 4.7 µs, 48 KB | 12.1 µs, 76 KB |
+| gRPC marshaller, serialize and parse | 5.6 µs | 38.4 µs |
+| Unary RPC over loopback | 64 µs, 73 KB | 115 µs, 202 KB |
+| Read every field of a table message | 26 µs, 120 KB | 27 µs, 181 KB (a tie on time) |
 
 **Where it loses or ties:**
 
 | Operation | FlatBuffers | Protocol Buffers |
 |---|---|---|
-| Encode 1000 string-heavy items (hand-written flatc code) | 46.5 µs | 32.5 µs |
-| Encode 50 string-heavy items (hand-written flatc code) | 3.0 µs | 1.6 µs |
-| Wire size, 1000 table items | 56,096 B | 35,779 B |
-| Wire size, 1000 structs (a 17-byte struct is padded to 24) | 24,040 B | 14,863 B |
-| Streaming small messages | ~13 µs per message (server stream), ~23 µs (bidi) | about the same |
+| Encode string-heavy tables (generated / hand-written flatc code) | 44–48 / 42 µs | 24–31 µs |
+| Same, 50 items | 2.8–3.4 / 2.5 µs | 1.3–1.6 µs |
+| Same, 1 item | 0.11 µs | 0.04 µs |
+| Compare one string field 5 times per item (`nameEquals`) | 25 µs, 0 B | 4.0 µs (it keeps the decoded `String`) |
+| Wire size | 56,096 B | 35,779 B |
+| Wire size, numeric structs (a 17-byte struct is padded to 24) | 24,040 B | 14,863 B |
+| Streaming small messages, per message (server / bidi) | 10.9 / 18.8 µs, 2.1 / 4.5 KB | 11.0 / 18.6 µs, 1.9 / 4.1 KB |
+| Unary RPC, 1 item | 52 µs | 52 µs |
 
-- **Encoding string-heavy tables stays slower** even in hand-optimized code, because FlatBuffers
-  builds back to front and writes offsets.
-- **Small-message streaming is a tie:** gRPC and coroutine overhead dominate, so the message format
-  barely matters. FlatBuffers only allocates less.
-- **Not measured:** gRPC compression, messages of several MB, unions, direct buffers, and Android
-  devices.
+- **Encoding string-heavy tables stays slower,** even in hand-written flatc code, because
+  FlatBuffers builds back to front and writes offsets.
+- **Small messages and streaming are a tie on time:** gRPC and coroutine overhead dominate, so the
+  message format barely matters.
+- **Not measured:** messages of several MB, unions, direct buffers, and Android devices.
+
+### Compression
+
+gRPC can compress each message (`stub.withCompression("gzip")`). It narrows the wire size gap
+without closing it, and it costs far more CPU than encoding:
+
+| 1000 items | FlatBuffers | Protocol Buffers |
+|---|---|---|
+| Size, gzip | 12,162 B (−78%) | 6,935 B (−81%) |
+| Compressing the message | 751 µs | 435 µs |
+| Unary RPC over loopback, with gzip | 922 µs | 637 µs |
+
+The test data's names are repetitive (`item-N-abcdefghij`), so real data usually compresses less.
+Compressing a 1000-item message takes about 0.75 ms and saves about 44 KB, which only pays off on
+links slower than roughly 500 Mbit/s. That covers mobile networks and the public internet, not a
+data center. FlatBuffers compresses slightly less well than Protocol Buffers, so compression
+doesn't change which format is smaller.
 
 ### scarabuff's own overhead
 
-The table above compares *hand-written* FlatBuffers code. scarabuff's generated builders add some
-overhead on top. These measurements come from a simpler timing loop, not JMH, on a different
-machine, so compare them with each other rather than with the table above:
+The same run, comparing scarabuff's generated builders with hand-written flatc code:
 
-| Encode 1000 items | scarabuff 0.4.0 | scarabuff 0.5.0 | hand-written flatc code |
+| Encode 1000 items | List of specs | `<Name>Spec.Vector` | hand-written flatc code |
 |---|---|---|---|
-| Tables | 211 µs, 1.64 MB | 64 µs, 294 KB | 54–57 µs, 234 KB |
-| Structs | 93 µs, 1.36 MB | 10.6 µs, 125 KB | 7–8 µs, 89 KB |
+| Tables | 48 µs, 187 KB | 44 µs, 143 KB | 42 µs, 121 KB (presized) |
+| Structs | 8.0 µs, 84 KB | 4.7 µs, 48 KB | 4.4 µs, 48 KB |
 
-Since 0.5.0, builders write nested messages and structs into one buffer (see
-[Building messages](#building-messages)). They're within about 15% of hand-written code for
-tables. For struct vectors, a list of specs costs about 1.8× hand-written code, all of it the spec
-objects; `<Struct>Spec.Vector` removes them. Measured with JMH, encoding 1000 structs:
-
-| Encode 1000 structs | time | allocated |
-|---|---|---|
-| `List<NumItemSpec>` | 8.5 µs | 84 KB |
-| `NumItemSpec.Vector` | 4.8 µs | 48 KB |
-| hand-written flatc code | 4.6 µs | 48 KB |
-| Protocol Buffers, repeated message | 11.7 µs | 76 KB |
+- **Builders write nested messages and structs into one buffer** (see
+  [Building messages](#building-messages)), so tables come within about 15% of hand-written code.
+- **For struct vectors, a list of specs costs nearly twice as much.** The extra cost is the spec
+  objects, and `<Struct>Spec.Vector` removes it.
+- **For tables, `Vector` mainly cuts allocation.**
+- **Before 0.5.0,** generated builders took 211 µs and 1.64 MB for the tables and 93 µs and 1.36 MB
+  for the structs. That was measured with a simpler timing loop.
 
 ### Getting the most out of it
 
@@ -393,6 +412,8 @@ objects; `<Struct>Spec.Vector` removes them. Measured with JMH, encoding 1000 st
   [Working with messages](#working-with-messages)).
 - **Read only what you need.** Partial reads are where FlatBuffers is far ahead. Convert to a spec
   or your own data class once, at the boundary.
+- **Compress only on slow links** (see [Compression](#compression)): `withCompression("gzip")` pays
+  off on mobile networks, not between servers in one data center.
 - **If writes of string-heavy data dominate, or bandwidth matters most,** Protocol Buffers is
   probably the better format.
 
@@ -480,8 +501,7 @@ with its changelog entry as the release notes.
 
 ## How scarabuff gets `flatc`
 
-`flatc`'s version and the `flatbuffers-java` / `flatbuffers-java-grpc` runtime jars **must
-match**. FlatBuffers releases `flatc` and every language runtime together under one version
+`flatc`'s version and the `flatbuffers-java` runtime jar **must match**. FlatBuffers releases `flatc` and every language runtime together under one version
 number, and a newer `flatc` happily emits code the older runtime can't load (for example a
 `Constants.FLATBUFFERS_25_12_19()` version check that doesn't exist in the `25.2.10` jar, which
 fails at compile time).
@@ -616,8 +636,8 @@ Since that class doesn't exist for Kotlin, `GrpcCoroutineGenerator` builds the s
 `ServiceDescriptor`/`MethodDescriptor`/marshaller logic itself via KotlinPoet, targeting the
 `--kotlin`-generated table classes directly. This works because those classes extend the exact
 same `com.google.flatbuffers.Table` base class the Java ones do. The marshaller is generated too,
-privately in each `<Service>GrpcKt`: `flatbuffers-java-grpc`'s `FlatbuffersUtils.marshaller`, which
-scarabuff used before 0.6.0, ignores a buffer's array offset, fails on direct buffers, and assumes
+privately in each `<Service>GrpcKt`, so `flatbuffers-java-grpc` isn't needed:
+its `FlatbuffersUtils.marshaller`, which scarabuff used before 0.6.0, ignores a buffer's array offset, fails on direct buffers, and assumes
 one `read` returns a whole message. So `Orchestrator` runs `flatc --kotlin` (no `--java`, no
 `--grpc`) and the entire generated output — table classes and gRPC wrapper alike — is Kotlin.
 
@@ -628,7 +648,13 @@ nix develop                    # pinned flatc, JDK 17 and Gradle on PATH, $FLATC
 ./gradlew build                # scarabuff-core, scarabuff-gradle-plugin, scarabuff-cli (core tests run flatc)
 cd example && ./gradlew test   # end-to-end round-trip proof, all 4 streaming kinds
 ./gradlew :scarabuff-gradle-plugin:functionalTest   # the Gradle/Kotlin compatibility matrix (slow)
+cd benchmark && ./gradlew jmh  # FlatBuffers against Protocol Buffers with JMH (slow; see below)
 ```
+
+`benchmark/` builds against this checkout, like `example/`, so it measures the code next to it.
+`./gradlew jmh` runs every benchmark, and `-PjmhArgs` passes JMH arguments to narrow it down,
+for example `./gradlew jmh -PjmhArgs="-p items=1000 HotSpotsBenchmark.enc"`. Results, with
+allocation per operation, go to `benchmark/build/jmh-result.json`.
 
 Or run a single command without entering the shell: `nix develop -c ./gradlew build`.
 
@@ -654,7 +680,7 @@ sometimes releases `flatc` without it.
    selects it` to `ScarabuffPluginFunctionalTest`, and list it in the README's supported versions.
 3. **To make it the default,** also change `flatbuffersJava` in `gradle/libs.versions.toml` and
    `flatcVersion` in `flake.nix`, with its per-system hashes (see the comment there), in the
-   same commit. Check `flatbuffersJavaGrpc` for a matching release too. Keep the old default
+   same commit. Keep the old default
    supported for at least one minor release, and note the change in the CHANGELOG.
 
 ## License

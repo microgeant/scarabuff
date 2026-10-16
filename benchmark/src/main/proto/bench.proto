@@ -1,0 +1,34 @@
+syntax = "proto3";
+package bench;
+option java_package = "com.scarabuff.benchmark.pb";
+option java_multiple_files = true;
+
+message Item {
+  int64 id = 1;
+  string name = 2;
+  double score = 3;
+  bool active = 4;
+}
+
+message Payload {
+  int64 id = 1;
+  string title = 2;
+  int64 timestamp_ms = 3;
+  repeated Item items = 4;
+}
+
+message Summary {
+  int32 count = 1;
+  double sum = 2;
+}
+
+message NumItem {
+  int64 id = 1;
+  double score = 2;
+  bool active = 3;
+}
+
+message NumPayload {
+  int64 id = 1;
+  repeated NumItem items = 2;
+}

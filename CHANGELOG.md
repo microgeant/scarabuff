@@ -6,6 +6,15 @@ and versions follow the policy in the README's [Versioning](README.md#versioning
 
 ## [Unreleased]
 
+### Breaking
+
+- **`<Struct>.build(...)` is removed,** as 0.5.0 announced. It allocated a builder per struct.
+  Use `<Struct>Spec(...)`, which table builders write inline: `pin = Vec2.build(x = 1f, y = 2f)`
+  becomes `pin = Vec2Spec(x = 1f, y = 2f)`. The IDE's quick fix on the deprecation does this.
+- **The plugin no longer adds `flatbuffers-java-grpc`.** The generated code doesn't use it any
+  more (see Fixed). If your own code calls `FlatbuffersUtils`, declare
+  `com.google.flatbuffers:flatbuffers-java-grpc:2.0.3` yourself.
+
 ### Added
 
 - **`<Name>Spec.Vector`, vectors without an object per element,** for structs and tables:
@@ -40,6 +49,11 @@ and versions follow the policy in the README's [Versioning](README.md#versioning
   `missingRequiredField()` checks it. Tables with union fields, and tables nesting them, now get
   builders. Still unsupported: vectors of unions, unions with struct or string members, and
   unions that list a table twice.
+
+- **Benchmarks in the repository:** `benchmark/` runs FlatBuffers against Protocol Buffers with JMH,
+  built against the checkout next to it (`cd benchmark && ./gradlew jmh`). It covers encoding,
+  decoding, the marshaller, unary RPCs, streaming, and gzip compression. The README's performance
+  numbers now come from it, and CI compiles it.
 
 ### Changed
 

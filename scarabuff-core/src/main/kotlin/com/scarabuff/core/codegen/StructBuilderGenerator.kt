@@ -3,7 +3,6 @@ package com.scarabuff.core.codegen
 import com.scarabuff.core.fbs.FbsTypeName
 import com.scarabuff.core.fbs.FieldKind
 import com.scarabuff.core.fbs.StructDef
-import com.squareup.kotlinpoet.AnnotationSpec
 import com.squareup.kotlinpoet.ClassName
 import com.squareup.kotlinpoet.CodeBlock
 import com.squareup.kotlinpoet.joinToCode
@@ -29,7 +28,6 @@ import com.squareup.kotlinpoet.TypeSpec
  * - `vec.toSpec()`: reads a received struct into a spec.
  * - `vec.copyInto(builder)`: writes a received struct inline into a message being built. Inside a
  *   table it must come immediately before the `add` call that places it.
- * - `Vec2.build(...)`, deprecated: it allocates a builder per struct. Use the spec instead.
  *
  * flatc's `create<Struct>` takes nested structs' fields flattened in declaration order
  * (`createPose(builder, position_x, position_y, angle)`), so nested values are expanded here.
@@ -55,15 +53,14 @@ object StructBuilderGenerator {
             .addType(spec(struct, structClass, structs))
             .addFunction(toSpec(struct, structClass))
             .addFunction(copyInto(struct, structClass, structs))
-            .addFunction(deprecatedBuild(struct, structClass, structs))
             .build()
     }
 
-    /** One per field; nested structs are specs, or flatc's struct views for the deprecated `build`. */
-    private fun parameters(struct: StructDef, specs: Boolean = true): List<ParameterSpec> = struct.fields.map { field ->
+    /** One per field; nested structs are specs. */
+    private fun parameters(struct: StructDef): List<ParameterSpec> = struct.fields.map { field ->
         val type: TypeName = when (val kind = field.kind) {
             is FieldKind.Scalar -> kind.type.typeName()
-            is FieldKind.Struct -> if (specs) TableBuilderGenerator.specClassName(kind.type) else kind.type.toClassName()
+            is FieldKind.Struct -> TableBuilderGenerator.specClassName(kind.type)
             else -> error("Unexpected kind ${field.kind} in struct ${struct.type}")
         }
         ParameterSpec.builder(FlatcNames.accessor(field.name), type).build()
@@ -199,38 +196,6 @@ object StructBuilderGenerator {
                 structClass, structClass.simpleName, flatten(struct, "this", structs, fromSpec = false).joinToString(", "),
             )
             .build()
-
-    /** The 0.4.0 way to make a struct value. Kept for one release so existing code still compiles. */
-    private fun deprecatedBuild(struct: StructDef, structClass: ClassName, structs: Map<FbsTypeName, StructDef>): FunSpec {
-        val spec = TableBuilderGenerator.specClassName(struct.type)
-        val args = parameters(struct).joinToString(", ") { it.name }
-        return FunSpec.builder("build")
-            .addKdoc("Creates a standalone %T value in a buffer of its own.", structClass)
-            .addAnnotation(
-                AnnotationSpec.builder(Deprecated::class)
-                    .addMember(
-                        "%S",
-                        "Allocates a FlatBufferBuilder per struct. Table builders take ${spec.simpleName} instead, " +
-                            "which they write inline.",
-                    )
-                    .addMember("ReplaceWith(%S, %S)", "${spec.simpleName}($args)", spec.canonicalName)
-                    .build()
-            )
-            .receiver(structClass.companion())
-            .addParameters(parameters(struct, specs = false))
-            .returns(structClass)
-            // The builder only hands out its buffer once finished, so finish it with the struct as
-            // the root, then find the struct through the root offset at the start of the buffer.
-            // Local names start with `_`, which no flatc field accessor does, so they can't clash.
-            .addStatement("val _builder = %T()", FLAT_BUFFER_BUILDER)
-            .addStatement(
-                "_builder.finish(%T.create%L(_builder, %L))",
-                structClass, structClass.simpleName, flatten(struct, null, structs, fromSpec = false).joinToString(", "),
-            )
-            .addStatement("val _buffer = _builder.dataBuffer()")
-            .addStatement("return %T().__assign(_buffer.position() + _buffer.getInt(_buffer.position()), _buffer)", structClass)
-            .build()
-    }
 
     /**
      * Expressions for every scalar in [struct], in the order flatc's `create<Struct>` takes them.
