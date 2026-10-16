@@ -3,25 +3,30 @@
 # is drop-in compatible with that project. flatc's own compiler version
 # (pinned separately in flake.nix) must equal flatbuffersJava, since
 # FlatBuffers releases flatc and every language runtime under one version.
-kotlin = "1.9.0"
+# Kotlin for scarabuff's own build. Its output targets Kotlin 1.9 (see build.gradle.kts), which
+# Gradle 8.7, the oldest supported, runs plugins on; 2.2 also works when a Gradle 9 build
+# includes this checkout, which Kotlin 1.9's Gradle plugin doesn't.
+kotlin = "2.2.10"
+# The Kotlin Gradle plugin API the plugin compiles against: the oldest Kotlin it supports, so it
+# can't use anything newer by accident.
+kotlinGradlePluginApi = "1.9.0"
 kotlinxCoroutines = "1.7.3"
 kotlinpoet = "1.12.0"
 flatbuffersJava = "25.2.10"
-flatbuffersJavaGrpc = "2.0.3"
 grpc = "1.70.0"
 grpcKotlin = "1.2.1"
 protobuf = "3.25.1"
 javaxAnnotation = "1.3.2"
 junit = "5.10.1"
 truth = "1.4.0"
-shadow = "8.1.1"
+# 8.3.x: still runs on Gradle 8.7, and on Gradle 9 when a build includes this checkout.
+shadow = "8.3.11"
 pluginPublish = "1.3.1"
 
 [libraries]
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }
 kotlinpoet = { module = "com.squareup:kotlinpoet", version.ref = "kotlinpoet" }
 flatbuffers-java = { module = "com.google.flatbuffers:flatbuffers-java", version.ref = "flatbuffersJava" }
-flatbuffers-java-grpc = { module = "com.google.flatbuffers:flatbuffers-java-grpc", version.ref = "flatbuffersJavaGrpc" }
 grpc-api = { module = "io.grpc:grpc-api", version.ref = "grpc" }
 grpc-stub = { module = "io.grpc:grpc-stub", version.ref = "grpc" }
 grpc-protobuf = { module = "io.grpc:grpc-protobuf", version.ref = "grpc" }
@@ -34,5 +39,5 @@ truth = { module = "com.google.truth:truth", version.ref = "truth" }
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 java-gradle-plugin = { id = "java-gradle-plugin" }
-shadow = { id = "com.github.johnrengelman.shadow", version.ref = "shadow" }
+shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }
 plugin-publish = { id = "com.gradle.plugin-publish", version.ref = "pluginPublish" }

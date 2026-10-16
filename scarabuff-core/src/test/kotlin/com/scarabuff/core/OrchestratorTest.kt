@@ -173,7 +173,7 @@ class OrchestratorTest {
         )
         assertThat(user).contains("fun User.Companion.fromBytes(bytes: ByteArray): User")
         val vec2 = generated("com.probe.msgs.Vec2Builders")
-        assertThat(vec2).contains("fun Vec2.Companion.build(x: Float, y: Float): Vec2")
+        assertThat(vec2).contains("data class Vec2Spec(")
         assertThat(vec2).contains("fun Vec2.copyInto(builder: FlatBufferBuilder): Int")
     }
 
@@ -185,7 +185,7 @@ class OrchestratorTest {
             namespace com.probe.u;
             struct Vec2 { x:float; y:float; }
             table A { x:int; }
-            union Payload { A }
+            union Payload { First: A, Second: A }
             table WithUnion { payload:Payload; pos:Vec2; }
             """,
         )
@@ -193,11 +193,38 @@ class OrchestratorTest {
         val result = generate()
 
         assertThat(result.tablesWithoutBuilders).containsExactly(
-            "com.probe.u.WithUnion", "union field `payload`",
+            "com.probe.u.WithUnion", "union (a table is listed twice) field `payload`",
         )
         val withUnion = generated("com.probe.u.WithUnionBuilders")
         assertThat(withUnion).contains("fun WithUnion.Companion.fromBytes(")
         assertThat(withUnion).doesNotContain("fun WithUnion.Companion.build(")
+    }
+
+    @Test
+    fun `unions of tables get an interface their members' specs implement`() {
+        schema(
+            "un.fbs",
+            """
+            namespace com.probe.un;
+            table A { x:int; }
+            table B { name:string (required); }
+            union Payload { A, B }
+            table WithUnion { payload:Payload; }
+            """,
+        )
+
+        val result = generate()
+
+        assertThat(result.tablesWithoutBuilders).isEmpty()
+        val union = generated("com.probe.un.PayloadSpec")
+        assertThat(union).contains("public interface PayloadSpec")
+        assertThat(union).contains("is ASpec -> Payload.A")
+        assertThat(generated("com.probe.un.ABuilders")).contains("public data class ASpec(")
+        assertThat(generated("com.probe.un.ABuilders").replace(Regex("""\s+"""), " ")).contains(") : PayloadSpec {")
+        val withUnion = generated("com.probe.un.WithUnionBuilders").replace(Regex("""\s+"""), " ")
+        assertThat(withUnion).contains("payload: PayloadSpec? = null")
+        assertThat(withUnion).contains("val t_payload = payload?.let { PayloadSpec.typeOf(it) }")
+        assertThat(withUnion).contains("Payload.B -> (this.payload(B()) as B?)?.missingRequiredField()")
     }
 
     @Test
@@ -234,7 +261,7 @@ class OrchestratorTest {
             """
             namespace com.probe.n;
             table A { x:int; }
-            union Payload { A }
+            union Payload { First: A, Second: A }
             table WithUnion { payload:Payload; }
             table Holder { held:WithUnion; }
             table Outer { holders:[Holder]; }
@@ -244,7 +271,7 @@ class OrchestratorTest {
         val result = generate()
 
         assertThat(result.tablesWithoutBuilders).containsExactly(
-            "com.probe.n.WithUnion", "union field `payload`",
+            "com.probe.n.WithUnion", "union (a table is listed twice) field `payload`",
             "com.probe.n.Holder", "field `held` holding `com.probe.n.WithUnion`, which has no builders",
             "com.probe.n.Outer", "field `holders` holding `com.probe.n.Holder`, which has no builders",
         )

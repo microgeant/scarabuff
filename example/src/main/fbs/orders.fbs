@@ -1,0 +1,25 @@
+// Required fields, nested ones included: the server rejects requests missing one with
+// INVALID_ARGUMENT before the implementation sees them (see RequiredFieldsTest).
+namespace com.scarabuff.example.orders;
+
+table Item {
+  sku:string (required);
+  quantity:int;
+}
+
+table Order {
+  id:string (required);
+  items:[Item];
+  gift:Item;
+}
+
+table Receipt {
+  items:int;
+}
+
+rpc_service OrderService {
+  Place(Order):Receipt;
+  Track(Order):Receipt (streaming: "server");
+  PlaceAll(Order):Receipt (streaming: "client");
+  Live(Order):Receipt (streaming: "bidi");
+}

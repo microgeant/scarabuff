@@ -94,8 +94,15 @@ rpc_service AVeryLongServiceNameThatPushesGeneratedLinesPastTheWrapLimit {
 // An empty table: its spec is a plain class, since a data class needs a property.
 table Empty {}
 
-// A union field means no builders for WithUnion, and so none for HoldsUnion, which nests it
-// (its builder would take a WithUnionSpec that doesn't exist).
-union Payload { Inner }
-table WithUnion { payload:Payload; }
+// Unions of tables: a member's spec is passed directly. Members can come from another namespace
+// and have required fields of their own. (A required union field doesn't work: flatc's own Kotlin
+// for it doesn't compile.)
+union Payload { Inner, Strict, com.probe.common.Shared }
+table WithUnion { payload:Payload; other:Payload; }
 table HoldsUnion { held:WithUnion; }
+
+// A table listed twice under different names: a spec can't say which is meant, so no builders
+// for WithAliased, nor for HoldsAliased, which nests it.
+union Aliased { First: Inner, Second: Inner }
+table WithAliased { which:Aliased; }
+table HoldsAliased { held:WithAliased; }

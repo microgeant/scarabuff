@@ -56,7 +56,8 @@ It's a good fit when FlatBuffers itself is the right choice:
 - **Binary payloads** such as audio or image buffers, read directly from the received bytes.
 - **A schema shared with native code.** The same `.fbs` works from C++, Rust and Swift.
 - **Numeric data as structs,** like sensor readings or poses: decoding a vector of structs is
-  about 11× faster than Protocol Buffers, and allocates almost nothing.
+  about 9× faster than Protocol Buffers and allocates almost nothing, and encoding one is about
+  2.5× faster.
 
 For an ordinary request/response API without those needs, Protocol Buffers with grpc-kotlin is
 usually the simpler choice:
@@ -70,9 +71,9 @@ usually the simpler choice:
 
 [Performance](#performance) has the measurements behind both lists.
 
-scarabuff's current limits: JVM and Android only, with the schema in a Kotlin/JVM module (see
-[Android](#android)). Generated builders don't support unions yet (see
-[Building messages](#building-messages)).
+scarabuff's current limits: JVM and Android only (Kotlin/JVM, Android library and app modules;
+see [Android](#android)), as the generated code uses Java libraries. Generated builders support unions of tables, but not vectors of unions
+(see [Building messages](#building-messages)).
 
 ## Quick start
 
@@ -82,13 +83,13 @@ scarabuff's current limits: JVM and Android only, with the schema in a Kotlin/JV
 ```kotlin
 // build.gradle.kts
 plugins {
-    kotlin("jvm") version "2.2.10"
-    id("io.github.microgeant.scarabuff") version "0.5.1"
+    kotlin("jvm") version "2.2.10" // or com.android.library / com.android.application
+    id("io.github.microgeant.scarabuff") version "0.6.0"
 }
 ```
 
 **2. Add a gRPC transport.** The plugin adds everything the generated code compiles against
-(flatbuffers-java, flatbuffers-java-grpc, grpc-stub, grpc-kotlin-stub, kotlinx-coroutines-core)
+(flatbuffers-java, grpc-stub, grpc-kotlin-stub, kotlinx-coroutines-core)
 at the versions it's tested with. The transport is up to you:
 
 ```kotlin
@@ -189,12 +190,18 @@ val again: Post = Post.fromBytes(bytes)
   every `Vec2Spec` property is required.
 - **Lists:** vectors take a `List` (`List<Int>`, `List<String>`, `List<UserSpec>`,
   `List<Vec2Spec>`, ...).
-- **Struct vectors without an object per struct:** `Vec2Spec.Vector(n) { i -> put(xs[i], ys[i]) }`
-  is a `List<Vec2Spec>` whose elements are produced while the message is written, so a 1000-struct
-  vector costs what hand-written flatc code does. `put` takes the struct's scalars, with nested
-  structs flattened (`put(positionX, positionY, angle)`). The callback must call `put` exactly once
-  per index, with the same values each time: it runs from the last index to the first, and again
-  whenever the list is read. It still reads, compares and prints like any list of specs.
+- **Vectors without an object per element:** every spec has a `Vector`, a `List` whose elements
+  are produced while the message is written, so a 1000-element vector doesn't allocate 1000
+  specs. Fill it with `put`, once per index:
+  - For a struct, `put` takes its scalars, with nested structs flattened:
+    `Vec2Spec.Vector(n) { i -> put(xs[i], ys[i]) }`, or `put(positionX, positionY, angle)` for a
+    struct nesting a `Vec2`. That costs what hand-written flatc code does.
+  - For a table, `put` takes the same named arguments as `build`, defaults included:
+    `UserSpec.Vector(n) { i -> put(id = ids[i], name = names[i]) }`.
+
+  `put` must be called with the same values each time for an index: the callback runs again
+  whenever the list is read, and structs are written from the last index to the first. A `Vector`
+  still reads, compares and prints like any list of specs.
 
   ```kotlin
   val route = Vec2Spec.Vector(xs.size) { i -> put(xs[i], ys[i]) }
@@ -210,10 +217,18 @@ val again: Post = Post.fromBytes(bytes)
   the offset, and `post.copyInto(builder)` re-serializes an existing message into it. A struct's
   `copyInto` and `writeTo` write it inline; inside a table, call them right before that field's
   `add` call.
-- **Not supported yet:** tables with union fields or vectors of unions, and tables that nest one of
-  those. They still get `fromBytes`, but no `build`, and the build says which field is the reason.
-  Build those by hand with flatc's `start`/`add`/`end` functions. (Fixed-size arrays in structs
-  never get this far: flatc doesn't support them for Kotlin.)
+- **Unions:** for `union Payload { Inner, Other }`, scarabuff generates a `PayloadSpec` interface,
+  and `InnerSpec` and `OtherSpec` implement it. A `payload:Payload` field takes either spec,
+  `WithUnion.build(payload = InnerSpec(v = 1))`, and the builder writes the type tag for you.
+  `toSpec()` reads back the member the tag names, or null for a tag it doesn't know, such as one
+  from a newer schema. Received messages still use flatc's accessors: check `payloadType`, then
+  read `payload(Inner())`. Don't mark a union field `(required)`: flatc's own Kotlin for it
+  doesn't compile.
+- **Not supported yet:** vectors of unions; unions whose members aren't all tables, or that list
+  a table twice under different names; and tables that nest one of those. They still get
+  `fromBytes`, but no `build`, and the build says which field is the reason. Build those by hand
+  with flatc's `start`/`add`/`end` functions. (Fixed-size arrays in structs never get this far:
+  flatc doesn't support them for Kotlin.)
 - **Optional scalars** (`count:int = null`) are written correctly even when set to `0`. flatc's
   own `addCount` would silently drop that value.
 - **Names:** a schema that already declares a type called `<Name>Spec` next to `<Name>` fails with a
@@ -227,8 +242,8 @@ In 0.4, nested values were finished messages (`author = User.build(...)`), and e
 a buffer of its own, then decoded and written again into the parent. Pass specs instead
 (`author = UserSpec(...)`), or `received.toSpec()` for a message you already have. For a 1000-item
 list, that makes building the message about 3x faster with about 5x less allocation, and about 9x
-faster with about 11x less allocation for a list of structs. `Vec2.build(...)` still works in
-this release, marked deprecated; use `Vec2Spec(...)`.
+faster with about 11x less allocation for a list of structs. Structs are specs too:
+`Vec2Spec(...)`, not `Vec2.build(...)`, which 0.5 deprecated and 0.6 removed.
 
 ## Working with messages
 
@@ -246,6 +261,21 @@ table GreetRequest { name:string (required); nickname:string; }
 `GreetRequest` by hand without it throws when the table is finished, and reading a message where a
 peer left it out throws too. Both are `AssertionError`s, which `catch (e: Exception)` doesn't
 catch.
+
+A peer can still send a message without it: an older client, one in another language, or a
+hand-written one. So:
+
+- **Servers check requests for you.** Before your implementation sees a request, the generated
+  server checks its required fields, including those of nested tables. A request missing one
+  fails the call with `INVALID_ARGUMENT`, such as `Order is missing required field items[1].sku`.
+  Before 0.6.0, clients got `UNKNOWN` from the `AssertionError` instead. Streams fail at the first
+  bad request. Request types without required fields aren't checked, so they cost nothing.
+- **Check other messages yourself** with `message.missingRequiredField()`. Every table has it. It
+  returns that path, or null if every required field is present. Use it for responses a client
+  receives, or bytes from `fromBytes`.
+
+The check reads presence from the message's vtable and decodes nothing. For a union, it checks the
+member the type tag names. It comes with the builders, so with `generateBuilders.set(false)` requests aren't checked.
 
 **Messages are views over bytes.** A table object reads its fields from a `ByteBuffer` on every
 access; it doesn't copy them out. With scarabuff's marshallers:
@@ -265,8 +295,8 @@ access; it doesn't copy them out. With scarabuff's marshallers:
   it. This relies on grpc-java's behavior rather than a documented guarantee;
   `StreamingBuilderReuseTest` in `example/` checks it on every build. To reuse a builder anywhere
   else, use `buildBytes(builder = ...)`, which copies the bytes out, and send `fromBytes(bytes)`.
-- **Use heap buffers.** The marshaller needs `ByteBuffer.array()`, which a direct `ByteBuffer`
-  doesn't have, so don't give `FlatBufferBuilder` a direct-buffer factory.
+- **Heap buffers are fastest.** A message in a direct (or read-only) buffer works, but the
+  marshaller has to copy it once to send it, since there's no backing array to write from.
 - **Map at the edges.** Accessors decode on every call (each `.name` read builds a new `String`),
   and a table keeps its whole message buffer alive. In app code, convert messages into data classes
   at the network boundary rather than passing tables around: `message.toSpec()` gives you the
@@ -290,69 +320,87 @@ access; it doesn't copy them out. With scarabuff's marshallers:
 
 ### FlatBuffers vs Protocol Buffers
 
-These numbers come from an external JMH benchmark run by a scarabuff user, and aren't in this
-repository. Setup:
-- JMH 1.37 on JDK 21 on an Apple-silicon Mac (one fork, 5 × 1 s iterations).
-- FlatBuffers via scarabuff 0.4.0 against protobuf-java 3.25.5 with grpc-kotlin, with the same
-  data on both sides.
-- The payload is an id, a title and N items of `{id, name, score, active}`.
+Measured with this repository's [`benchmark/`](benchmark) (see [Development](#development) to run
+it), against scarabuff 0.6.0 as developed:
+- JMH 1.37 on JDK 17, on an Apple M5 Mac: one fork, 3 warm-up and 5 one-second iterations.
+- FlatBuffers through scarabuff's generated code (hand-written flatc code where noted), against
+  protobuf-java 3.25.5. Both use grpc-java 1.70 over Netty, with the same data on both sides.
+- The payload is an id, a title and N items of `{id, name, score, active}`. The numeric variant
+  has items of `{id, score, active}`: a struct vector in FlatBuffers, a repeated message in
+  Protocol Buffers.
 
-Treat differences under about 20% as noise.
+Times are per operation, and allocation is bytes allocated per operation. Allocation is exact.
+Times vary by up to about 20% between runs, so treat smaller differences as ties. Results are for
+1000 items unless noted.
 
 **Where FlatBuffers wins:**
 
 | Operation | FlatBuffers | Protocol Buffers |
 |---|---|---|
-| Read a few fields of a 1000-item message | ~2 ns, 0 B | 30 µs, 181 KB (it must parse first) |
-| Decode a 1000-item vector of numeric structs | 1.04 µs, 88 B | 11.5 µs, 61 KB |
-| Read every field of a table message | ~10% faster, ~35% less allocation | |
-| Marshaller round trip | 15–35% faster | |
-| Unary RPC, 8 threads, 1000 items (one run, indicative) | 186 µs, 73 KB | 244 µs, 201 KB |
+| Read two fields of a message | 0.004 µs, 56 B | 28.8 µs, 181 KB (it must parse first) |
+| Decode a vector of numeric structs | 1.13 µs, 88 B | 10.3 µs, 61 KB |
+| Encode a vector of numeric structs (`NumItemSpec.Vector`) | 4.7 µs, 48 KB | 12.1 µs, 76 KB |
+| gRPC marshaller, serialize and parse | 5.6 µs | 38.4 µs |
+| Unary RPC over loopback | 64 µs, 73 KB | 115 µs, 202 KB |
+| Read every field of a table message | 26 µs, 120 KB | 27 µs, 181 KB (a tie on time) |
 
 **Where it loses or ties:**
 
 | Operation | FlatBuffers | Protocol Buffers |
 |---|---|---|
-| Encode 1000 string-heavy items (hand-written flatc code) | 46.5 µs | 32.5 µs |
-| Encode 50 string-heavy items (hand-written flatc code) | 3.0 µs | 1.6 µs |
-| Wire size, 1000 table items | 56,096 B | 35,779 B |
-| Wire size, 1000 structs (a 17-byte struct is padded to 24) | 24,040 B | 14,863 B |
-| Streaming small messages | ~13 µs per message (server stream), ~23 µs (bidi) | about the same |
+| Encode string-heavy tables (generated / hand-written flatc code) | 44–48 / 42 µs | 24–31 µs |
+| Same, 50 items | 2.8–3.4 / 2.5 µs | 1.3–1.6 µs |
+| Same, 1 item | 0.11 µs | 0.04 µs |
+| Compare one string field 5 times per item (`nameEquals`) | 25 µs, 0 B | 4.0 µs (it keeps the decoded `String`) |
+| Wire size | 56,096 B | 35,779 B |
+| Wire size, numeric structs (a 17-byte struct is padded to 24) | 24,040 B | 14,863 B |
+| Streaming small messages, per message (server / bidi) | 10.9 / 18.8 µs, 2.1 / 4.5 KB | 11.0 / 18.6 µs, 1.9 / 4.1 KB |
+| Unary RPC, 1 item | 52 µs | 52 µs |
 
-- **Encoding string-heavy tables stays slower** even in hand-optimized code, because FlatBuffers
-  builds back to front and writes offsets.
-- **Small-message streaming is a tie:** gRPC and coroutine overhead dominate, so the message format
-  barely matters. FlatBuffers only allocates less.
-- **Not measured:** gRPC compression, messages of several MB, unions, direct buffers, and Android
-  devices.
+- **Encoding string-heavy tables stays slower,** even in hand-written flatc code, because
+  FlatBuffers builds back to front and writes offsets.
+- **Small messages and streaming are a tie on time:** gRPC and coroutine overhead dominate, so the
+  message format barely matters.
+- **Not measured:** messages of several MB, unions, direct buffers, and Android devices.
+
+### Compression
+
+gRPC can compress each message (`stub.withCompression("gzip")`). It narrows the wire size gap
+without closing it, and it costs far more CPU than encoding:
+
+| 1000 items | FlatBuffers | Protocol Buffers |
+|---|---|---|
+| Size, gzip | 12,162 B (−78%) | 6,935 B (−81%) |
+| Compressing the message | 751 µs | 435 µs |
+| Unary RPC over loopback, with gzip | 922 µs | 637 µs |
+
+The test data's names are repetitive (`item-N-abcdefghij`), so real data usually compresses less.
+Compressing a 1000-item message takes about 0.75 ms and saves about 44 KB, which only pays off on
+links slower than roughly 500 Mbit/s. That covers mobile networks and the public internet, not a
+data center. FlatBuffers compresses slightly less well than Protocol Buffers, so compression
+doesn't change which format is smaller.
 
 ### scarabuff's own overhead
 
-The table above compares *hand-written* FlatBuffers code. scarabuff's generated builders add some
-overhead on top. These measurements come from a simpler timing loop, not JMH, on a different
-machine, so compare them with each other rather than with the table above:
+The same run, comparing scarabuff's generated builders with hand-written flatc code:
 
-| Encode 1000 items | scarabuff 0.4.0 | scarabuff 0.5.0 | hand-written flatc code |
+| Encode 1000 items | List of specs | `<Name>Spec.Vector` | hand-written flatc code |
 |---|---|---|---|
-| Tables | 211 µs, 1.64 MB | 64 µs, 294 KB | 54–57 µs, 234 KB |
-| Structs | 93 µs, 1.36 MB | 10.6 µs, 125 KB | 7–8 µs, 89 KB |
+| Tables | 48 µs, 187 KB | 44 µs, 143 KB | 42 µs, 121 KB (presized) |
+| Structs | 8.0 µs, 84 KB | 4.7 µs, 48 KB | 4.4 µs, 48 KB |
 
-Since 0.5.0, builders write nested messages and structs into one buffer (see
-[Building messages](#building-messages)). They're within about 15% of hand-written code for
-tables. For struct vectors, a list of specs costs about 1.8× hand-written code, all of it the spec
-objects; `<Struct>Spec.Vector` removes them. Measured with JMH, encoding 1000 structs:
-
-| Encode 1000 structs | time | allocated |
-|---|---|---|
-| `List<NumItemSpec>` | 8.5 µs | 84 KB |
-| `NumItemSpec.Vector` | 4.8 µs | 48 KB |
-| hand-written flatc code | 4.6 µs | 48 KB |
-| Protocol Buffers, repeated message | 11.7 µs | 76 KB |
+- **Builders write nested messages and structs into one buffer** (see
+  [Building messages](#building-messages)), so tables come within about 15% of hand-written code.
+- **For struct vectors, a list of specs costs nearly twice as much.** The extra cost is the spec
+  objects, and `<Struct>Spec.Vector` removes it.
+- **For tables, `Vector` mainly cuts allocation.**
+- **Before 0.5.0,** generated builders took 211 µs and 1.64 MB for the tables and 93 µs and 1.36 MB
+  for the structs. That was measured with a simpler timing loop.
 
 ### Getting the most out of it
 
 - **Put numeric data in structs.** That's where FlatBuffers wins most clearly, on both encode and
-  decode. Build large struct vectors with `<Struct>Spec.Vector` when the data is already in arrays.
+  decode. Build large vectors with `<Name>Spec.Vector` when the data is already in arrays.
 - **Use narrower types,** such as `float` instead of `double` and `ushort` instead of `int`, where
   the range allows. That shrinks messages, which are larger than Protocol Buffers'.
 - **Let the builders size themselves.** Since 0.5.1 they start at an estimate of each message's
@@ -364,38 +412,48 @@ objects; `<Struct>Spec.Vector` removes them. Measured with JMH, encoding 1000 st
   [Working with messages](#working-with-messages)).
 - **Read only what you need.** Partial reads are where FlatBuffers is far ahead. Convert to a spec
   or your own data class once, at the boundary.
+- **Compress only on slow links** (see [Compression](#compression)): `withCompression("gzip")` pays
+  off on mobile networks, not between servers in one data center.
 - **If writes of string-heavy data dominate, or bandwidth matters most,** Protocol Buffers is
   probably the better format.
 
 ## Android
 
-The plugin currently needs the `org.jetbrains.kotlin.jvm` plugin, so it can't be applied to an
-Android module directly. Put the schemas in a small Kotlin/JVM module and depend on it from the
-app:
+Apply the plugin to an Android library or app module, next to the Android Gradle plugin, with
+the schemas in `src/main/fbs`:
 
 ```kotlin
-// api/build.gradle.kts
+// app/build.gradle.kts
 plugins {
-    kotlin("jvm")
-    id("io.github.microgeant.scarabuff") version "0.5.1"
+    id("com.android.application")
+    id("io.github.microgeant.scarabuff") version "0.6.0"
 }
 
-// app/build.gradle.kts
 dependencies {
-    implementation(project(":api"))
     implementation("io.grpc:grpc-okhttp:1.70.0")
 }
 ```
 
-- **Transport:** use `grpc-okhttp` on Android, not `grpc-netty`.
-- **JVM target:** keep the schema module's bytecode target at or below the app's. If the app
-  compiles for Java 11, set the same in the schema module:
+- **Variants:** each variant gets its own `generate<Variant>ScarabuffSources` task, registered
+  through AGP's variant API as generated sources. So Android Studio sees them, and AGP 9's
+  built-in Kotlin or the Kotlin Android plugin compiles them. `generateScarabuffSources` runs
+  them all.
+- **Libraries:** in a library module the runtime libraries are added to `api`, so modules depending
+  on it can use the generated types. In an app they go to `implementation`.
+- **FlatBuffers version:** an Android module has a compile classpath per variant, so `flatc`
+  follows `flatbuffersVersion` instead of whatever `flatbuffers-java` a variant resolves. To
+  change both, set `scarabuff { flatbuffersVersion.set(...) }`.
+- **Sharing the schema with a server:** if a Kotlin/JVM server uses the same schema, put the
+  schemas in a small Kotlin/JVM module instead, and depend on it from both. Then both compile
+  against one copy of the generated code. Keep that module's bytecode target at or below the
+  app's: if the app compiles for Java 11, set the same there:
 
   ```kotlin
   java { targetCompatibility = JavaVersion.VERSION_11 }
   kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11) } }
   ```
 
+- **Transport:** use `grpc-okhttp` on Android, not `grpc-netty`.
 - **Reaching a server on your machine:**
   - From the emulator, `10.0.2.2` is your machine's `localhost`.
   - Or run `adb reverse tcp:50051 tcp:50051` and connect to `127.0.0.1:50051`. This also works
@@ -418,6 +476,13 @@ Each release is tested by building and running `example/` against the published 
 | 8.14.6 | 2.1.21 |
 | 9.1.0 | 2.2.10 |
 | 9.8.1 | 2.4.21 |
+
+And in Android modules, building release and running the same tests as local unit tests:
+
+| Android Gradle plugin | Module | Gradle | Kotlin |
+|---|---|---|---|
+| 8.13.0 | library | 8.14.6 | Kotlin Android plugin 2.1.21 |
+| 9.0.1 | app | 9.1.0 | AGP's built-in Kotlin |
 
 Versions in between are very likely fine; these are the ones that are actually checked, by
 `./gradlew :scarabuff-gradle-plugin:functionalTest`. Gradle must run on JDK 17 or newer, and the
@@ -451,8 +516,7 @@ with its changelog entry as the release notes.
 
 ## How scarabuff gets `flatc`
 
-`flatc`'s version and the `flatbuffers-java` / `flatbuffers-java-grpc` runtime jars **must
-match**. FlatBuffers releases `flatc` and every language runtime together under one version
+`flatc`'s version and the `flatbuffers-java` runtime jar **must match**. FlatBuffers releases `flatc` and every language runtime together under one version
 number, and a newer `flatc` happily emits code the older runtime can't load (for example a
 `Constants.FLATBUFFERS_25_12_19()` version check that doesn't exist in the `25.2.10` jar, which
 fails at compile time).
@@ -460,14 +524,36 @@ fails at compile time).
 So by default the plugin manages `flatc` itself:
 
 1. It reads the `com.google.flatbuffers:flatbuffers-java` version from your compile classpath
-   (or `flatcVersion`, if you set it).
+   (or `flatcVersion`, if you set it). That's `flatbuffersVersion` unless something else in your
+   build brings in a newer one.
 2. It downloads that version's official binary from the
    [FlatBuffers GitHub releases](https://github.com/google/flatbuffers/releases), checks it
    against a SHA-256 pinned in the plugin, and caches it in
    `~/.gradle/caches/scarabuff/flatc/`. Later builds reuse it.
 
-Supported versions: **25.2.10**, on macOS (Intel and Apple Silicon), Linux x86_64 and Windows
-x86_64. There's no official Linux ARM binary.
+Supported versions, each tested end to end on every build:
+
+| FlatBuffers | |
+|---|---|
+| **25.2.10** | The default. The newest `flatbuffers-java` on Maven Central: FlatBuffers has released newer `flatc` versions (25.9.23, 25.12.19), but no Java runtime to match them. |
+| **24.3.25** | For projects that pin an older `flatbuffers-java`. |
+
+Each is supported on macOS (Intel and Apple Silicon), Linux x86_64 and Windows x86_64. There's no
+official Linux ARM binary, so on Linux ARM (ARM CI runners, AWS Graviton) the build stops and prints
+the commands to build the matching `flatc` from source: a `git clone` of that release, then CMake.
+It takes a minute or two, needs CMake and a C++ compiler, and only has to be done once per machine
+or CI image. Distribution packages such as apt's `flatbuffers-compiler` are usually another version,
+which won't match the runtime.
+
+To switch, set one property. It changes the `flatbuffers-java` the plugin adds, and with it the
+`flatc` it installs:
+
+```kotlin
+scarabuff { flatbuffersVersion.set("24.3.25") }
+```
+
+Pinning `flatbuffers-java` with `strictly` doesn't work instead: it conflicts with the version
+the plugin adds.
 
 To use your own `flatc` instead (another version, Linux ARM, offline builds), set
 `scarabuff { flatc.set("/path/to/flatc") }` or the `FLATC` environment variable; `flatc` wins
@@ -486,7 +572,7 @@ All settings are optional:
 scarabuff {
     schemaDir.set(layout.projectDirectory.dir("src/main/fbs"))
     outputDir.set(layout.buildDirectory.dir("generated/source/scarabuff"))
-    flatcVersion.set("25.2.10")
+    flatbuffersVersion.set("25.2.10")
     kotlinPackageSuffix.set(".grpc")
 }
 ```
@@ -495,7 +581,8 @@ scarabuff {
 |---|---|---|
 | `schemaDir` | `src/main/fbs` | Directory containing the `.fbs` schemas. |
 | `outputDir` | `build/generated/source/scarabuff` | Where generated Kotlin goes; added to the `main` source set automatically. |
-| `flatcVersion` | your `flatbuffers-java` version | Which `flatc` to download and cache. |
+| `flatbuffersVersion` | `25.2.10` | The FlatBuffers version: the `flatbuffers-java` the plugin adds, and so the `flatc` it installs. See [How scarabuff gets `flatc`](#how-scarabuff-gets-flatc). |
+| `flatcVersion` | your `flatbuffers-java` version | Which `flatc` to download and cache, if it must differ from the runtime's. Rarely needed. |
 | `flatc` | `$FLATC` | Use this `flatc` executable (path, or name on `$PATH`) instead of downloading one. |
 | `addRuntimeDependencies` | `true` | Add the libraries the generated code needs to `api`. Set to `false` to declare them all yourself. |
 | `generateBuilders` | `true` | Generate `<Table>Builders.kt` for each table; see [Building messages](#building-messages). |
@@ -514,6 +601,11 @@ pluginManagement {
     includeBuild("../path/to/scarabuff")
 }
 ```
+
+This works from Gradle 8.7 through Gradle 9, in Kotlin/JVM and Android projects. `example/` checks
+it on Gradle 8.7 and `benchmark/` on Gradle 9.1. A checkout from before 0.6.0 can't be included
+by a Gradle 9 build: its own build used Kotlin 1.9's Gradle plugin, which Gradle 9 no longer
+supports.
 
 ## Using the CLI
 
@@ -563,11 +655,11 @@ wrapper would then just delegate to that class's static accessors.
 Since that class doesn't exist for Kotlin, `GrpcCoroutineGenerator` builds the same
 `ServiceDescriptor`/`MethodDescriptor`/marshaller logic itself via KotlinPoet, targeting the
 `--kotlin`-generated table classes directly. This works because those classes extend the exact
-same `com.google.flatbuffers.Table` base class the Java ones do, and
-`com.google.flatbuffers.grpc.FlatbuffersUtils.marshaller(...)` (from the `flatbuffers-java-grpc`
-runtime jar, still a regular dependency — not generated code) is generic over any `Table`
-subclass. So `Orchestrator` runs `flatc --kotlin` (no `--java`, no `--grpc`) and the entire
-generated output — table classes and gRPC wrapper alike — is Kotlin.
+same `com.google.flatbuffers.Table` base class the Java ones do. The marshaller is generated too,
+privately in each `<Service>GrpcKt`, so `flatbuffers-java-grpc` isn't needed:
+its `FlatbuffersUtils.marshaller`, which scarabuff used before 0.6.0, ignores a buffer's array offset, fails on direct buffers, and assumes
+one `read` returns a whole message. So `Orchestrator` runs `flatc --kotlin` (no `--java`, no
+`--grpc`) and the entire generated output — table classes and gRPC wrapper alike — is Kotlin.
 
 ## Development
 
@@ -576,7 +668,13 @@ nix develop                    # pinned flatc, JDK 17 and Gradle on PATH, $FLATC
 ./gradlew build                # scarabuff-core, scarabuff-gradle-plugin, scarabuff-cli (core tests run flatc)
 cd example && ./gradlew test   # end-to-end round-trip proof, all 4 streaming kinds
 ./gradlew :scarabuff-gradle-plugin:functionalTest   # the Gradle/Kotlin compatibility matrix (slow)
+cd benchmark && ./gradlew jmh  # FlatBuffers against Protocol Buffers with JMH (slow; see below)
 ```
+
+`benchmark/` builds against this checkout, like `example/`, so it measures the code next to it.
+`./gradlew jmh` runs every benchmark, and `-PjmhArgs` passes JMH arguments to narrow it down,
+for example `./gradlew jmh -PjmhArgs="-p items=1000 HotSpotsBenchmark.enc"`. Results, with
+allocation per operation, go to `benchmark/build/jmh-result.json`.
 
 Or run a single command without entering the shell: `nix develop -c ./gradlew build`.
 
@@ -589,10 +687,21 @@ Or run a single command without entering the shell: `nix develop -c ./gradlew bu
 - **`flatc`** is pinned by [`flake.nix`](flake.nix) to the FlatBuffers `v25.2.10` release
   binaries, for `x86_64-linux`, `x86_64-darwin` and `aarch64-darwin` (there's no official
   `aarch64-linux` binary for that release). `flake.lock` pins the `nixpkgs` revision.
-- To bump FlatBuffers: change `flatcVersion` in `flake.nix` (and its per-system asset hashes, see
-  the comment there) together with `flatbuffersJava`/`flatbuffersJavaGrpc` in
-  `gradle/libs.versions.toml`, in the same commit. To let users' builds download the new
-  version, also add its assets and hashes to `FlatcInstaller.RELEASES`.
+
+### Supporting another FlatBuffers version
+
+A version is only worth adding once its `flatbuffers-java` is on Maven Central; FlatBuffers
+sometimes releases `flatc` without it.
+
+1. **Hash its binaries:** download `Mac.flatc.binary.zip`, `Linux.flatc.binary.g++-13.zip` and
+   `Windows.flatc.binary.zip` from the GitHub release, run `shasum -a 256` on each, and add an
+   entry to `FlatcInstaller.RELEASES`.
+2. **Test it:** add a case like `an older FlatBuffers version works when flatbuffersVersion
+   selects it` to `ScarabuffPluginFunctionalTest`, and list it in the README's supported versions.
+3. **To make it the default,** also change `flatbuffersJava` in `gradle/libs.versions.toml` and
+   `flatcVersion` in `flake.nix`, with its per-system hashes (see the comment there), in the
+   same commit. Keep the old default
+   supported for at least one minor release, and note the change in the CHANGELOG.
 
 ## License
 

@@ -3,7 +3,6 @@ package com.scarabuff.core.codegen
 import com.scarabuff.core.fbs.FbsTypeName
 import com.scarabuff.core.fbs.FieldKind
 import com.scarabuff.core.fbs.StructDef
-import com.squareup.kotlinpoet.AnnotationSpec
 import com.squareup.kotlinpoet.ClassName
 import com.squareup.kotlinpoet.CodeBlock
 import com.squareup.kotlinpoet.joinToCode
@@ -29,7 +28,6 @@ import com.squareup.kotlinpoet.TypeSpec
  * - `vec.toSpec()`: reads a received struct into a spec.
  * - `vec.copyInto(builder)`: writes a received struct inline into a message being built. Inside a
  *   table it must come immediately before the `add` call that places it.
- * - `Vec2.build(...)`, deprecated: it allocates a builder per struct. Use the spec instead.
  *
  * flatc's `create<Struct>` takes nested structs' fields flattened in declaration order
  * (`createPose(builder, position_x, position_y, angle)`), so nested values are expanded here.
@@ -37,7 +35,6 @@ import com.squareup.kotlinpoet.TypeSpec
 object StructBuilderGenerator {
 
     private val FLAT_BUFFER_BUILDER = ClassName("com.google.flatbuffers", "FlatBufferBuilder")
-    private val ABSTRACT_LIST = ClassName("kotlin.collections", "AbstractList")
 
     /** The generated `<Struct>Spec.Vector`, which table builders write without an object per element. */
     fun vectorClassName(type: FbsTypeName) = TableBuilderGenerator.specClassName(type).nestedClass("Vector")
@@ -56,15 +53,14 @@ object StructBuilderGenerator {
             .addType(spec(struct, structClass, structs))
             .addFunction(toSpec(struct, structClass))
             .addFunction(copyInto(struct, structClass, structs))
-            .addFunction(deprecatedBuild(struct, structClass, structs))
             .build()
     }
 
-    /** One per field; nested structs are specs, or flatc's struct views for the deprecated `build`. */
-    private fun parameters(struct: StructDef, specs: Boolean = true): List<ParameterSpec> = struct.fields.map { field ->
+    /** One per field; nested structs are specs. */
+    private fun parameters(struct: StructDef): List<ParameterSpec> = struct.fields.map { field ->
         val type: TypeName = when (val kind = field.kind) {
             is FieldKind.Scalar -> kind.type.typeName()
-            is FieldKind.Struct -> if (specs) TableBuilderGenerator.specClassName(kind.type) else kind.type.toClassName()
+            is FieldKind.Struct -> TableBuilderGenerator.specClassName(kind.type)
             else -> error("Unexpected kind ${field.kind} in struct ${struct.type}")
         }
         ParameterSpec.builder(FlatcNames.accessor(field.name), type).build()
@@ -98,136 +94,40 @@ object StructBuilderGenerator {
             .build()
     }
 
-    /**
-     * `<Struct>Spec.Vector`: a `List<Spec>` whose elements come from a `fill` callback instead of
-     * objects. `fill` calls `put` with every scalar of the struct, nested structs flattened, so
-     * writing a vector of them allocates nothing per element. Reading it as a list builds specs on
-     * demand, so it still compares equal to an ordinary list of the same values.
-     *
-     * The writer's own members start with `_`, which no flatc field accessor does, so `put`'s
-     * parameters can't shadow them. Lines here stay short: KotlinPoet wraps long ones.
-     */
+    /** `<Struct>Spec.Vector`; see [SpecVectorGenerator]. `put` takes nested structs' fields flattened. */
     private fun vector(struct: StructDef, structClass: ClassName, structs: Map<FbsTypeName, StructDef>): TypeSpec {
         val spec = TableBuilderGenerator.specClassName(struct.type)
-        val vector = vectorClassName(struct.type)
-        val writer = vector.nestedClass("Writer")
-        val fill = vector.nestedClass("Fill")
         val flat = flatParameters(struct, structs)
         val names = flat.joinToString(", ") { it.name }
-        val example = if (flat.size <= 3) names else flat.take(2).joinToString(", ") { it.name } + ", …"
-        return TypeSpec.classBuilder(vector)
-            .addKdoc(
-                "%L structs for a vector field, produced by [fill] while the message is written, so there's no " +
-                    "object per struct: `%L.Vector(n) { i -> put(%L) }`. Table specs take it wherever they take a " +
-                    "`List<%L>`.\n\n" +
-                    "[fill] must call `put` exactly once per index, with the same values every time: writing calls " +
-                    "it from the last index to the first, and reading an element of the list calls it again.",
-                structClass.simpleName, spec.simpleName, example, spec.simpleName,
-            )
-            .superclass(ABSTRACT_LIST.parameterizedBy(spec))
-            .primaryConstructor(
-                FunSpec.constructorBuilder()
-                    .addParameter("size", INT)
-                    .addParameter("fill", fill)
-                    .build()
-            )
-            .addProperty(PropertySpec.builder("size", INT, KModifier.OVERRIDE).initializer("size").build())
-            .addProperty(PropertySpec.builder("fill", fill, KModifier.PRIVATE).initializer("fill").build())
-            .addInitializerBlock(CodeBlock.of("require(size >= 0) { \"size must not be negative: \$size\" }\n"))
-            .addType(
-                TypeSpec.funInterfaceBuilder(fill)
-                    .addKdoc("Calls [Writer.put] once with the struct at [index].")
-                    .addFunction(
-                        FunSpec.builder("write")
-                            .addModifiers(KModifier.ABSTRACT)
-                            .receiver(writer)
-                            .addParameter("index", INT)
-                            .build()
+        return SpecVectorGenerator.generate(
+            spec = spec,
+            typeName = structClass.simpleName,
+            kind = "struct",
+            putParameters = flat.map { ParameterSpec.builder(it.name, it.type).build() },
+            putKdoc = if (flat.any { it.nested }) "Gives the struct's values, nested structs' fields flattened." else "Gives the struct's values.",
+            example = if (flat.size <= 3) names else flat.take(2).joinToString(", ") { it.name } + ", …",
+            order = "from the last index to the first",
+            write = CodeBlock.of("%T.create%L(_builder, %L)", structClass, structClass.simpleName, names),
+            record = specOf(struct, structs, flat.iterator()),
+        ) { vector, writer ->
+            listOf(
+                FunSpec.builder("writeElements")
+                    .addKdoc(
+                        "Writes [specs] into a vector already started in [builder], last first, as FlatBuffers " +
+                            "requires. A [%T] writes without an object per struct.",
+                        vector,
                     )
+                    .addParameter("builder", FLAT_BUFFER_BUILDER)
+                    .addParameter("specs", LIST.parameterizedBy(spec))
+                    .beginControlFlow("if (specs is %T)", vector)
+                    .addStatement("val _writer = %T(builder)", writer)
+                    .addStatement("for (i in specs.size - 1 downTo 0) specs.write(_writer, i)")
+                    .nextControlFlow("else")
+                    .addStatement("for (i in specs.size - 1 downTo 0) specs[i].writeTo(builder)")
+                    .endControlFlow()
                     .build()
             )
-            .addType(writerType(struct, structClass, structs, writer, flat))
-            .addFunction(
-                FunSpec.builder("get")
-                    .addModifiers(KModifier.OVERRIDE)
-                    .addParameter("index", INT)
-                    .returns(spec)
-                    .addStatement("if (index !in 0 until size) throw IndexOutOfBoundsException(\"index \$index, size \$size\")")
-                    .addStatement("val _writer = %T(null)", writer)
-                    .addStatement("write(_writer, index)")
-                    .addStatement("return _writer._last!!")
-                    .build()
-            )
-            .addFunction(
-                FunSpec.builder("write")
-                    .addModifiers(KModifier.PRIVATE)
-                    .addParameter("writer", writer)
-                    .addParameter("index", INT)
-                    .addStatement("writer._puts = 0")
-                    .addStatement("with(fill)·{ writer.write(index) }")
-                    .addStatement("check(writer._puts == 1) { \"fill called put \${writer._puts} times for index \$index, not once\" }")
-                    .build()
-            )
-            .addType(
-                TypeSpec.companionObjectBuilder()
-                    .addModifiers(KModifier.INTERNAL)
-                    .addFunction(
-                        FunSpec.builder("writeElements")
-                            .addKdoc(
-                                "Writes [specs] into a vector already started in [builder], last first, as " +
-                                    "FlatBuffers requires. A [%T] writes without an object per struct.",
-                                vector,
-                            )
-                            .addParameter("builder", FLAT_BUFFER_BUILDER)
-                            .addParameter("specs", LIST.parameterizedBy(spec))
-                            .beginControlFlow("if (specs is %T)", vector)
-                            .addStatement("val _writer = %T(builder)", writer)
-                            .addStatement("for (i in specs.size - 1 downTo 0) specs.write(_writer, i)")
-                            .nextControlFlow("else")
-                            .addStatement("for (i in specs.size - 1 downTo 0) specs[i].writeTo(builder)")
-                            .endControlFlow()
-                            .build()
-                    )
-                    .build()
-            )
-            .build()
-    }
-
-    private fun writerType(
-        struct: StructDef,
-        structClass: ClassName,
-        structs: Map<FbsTypeName, StructDef>,
-        writer: ClassName,
-        flat: List<FlatParameter>,
-    ): TypeSpec {
-        val put = FunSpec.builder("put")
-            .addKdoc(if (flat.any { it.nested }) "Gives the struct's values, nested structs' fields flattened." else "Gives the struct's values.")
-            .addParameters(flat.map { ParameterSpec.builder(it.name, it.type).build() })
-            .addStatement("_puts++")
-            .beginControlFlow("if (_builder != null)")
-            .addStatement("%T.create%L(_builder, %L)", structClass, structClass.simpleName, flat.joinToString(", ") { it.name })
-            .nextControlFlow("else")
-            .addStatement("_last = %L", specOf(struct, structs, flat.iterator()))
-            .endControlFlow()
-        return TypeSpec.classBuilder(writer)
-            .addKdoc("Receives the struct for each index, from [Fill].")
-            .primaryConstructor(
-                FunSpec.constructorBuilder()
-                    .addModifiers(KModifier.INTERNAL)
-                    .addParameter("_builder", FLAT_BUFFER_BUILDER.copy(nullable = true))
-                    .build()
-            )
-            .addProperty(
-                PropertySpec.builder("_builder", FLAT_BUFFER_BUILDER.copy(nullable = true), KModifier.PRIVATE)
-                    .initializer("_builder").build()
-            )
-            .addProperty(PropertySpec.builder("_puts", INT, KModifier.INTERNAL).mutable().initializer("0").build())
-            .addProperty(
-                PropertySpec.builder("_last", TableBuilderGenerator.specClassName(struct.type).copy(nullable = true), KModifier.INTERNAL)
-                    .mutable().initializer("null").build()
-            )
-            .addFunction(put.build())
-            .build()
+        }
     }
 
     /** One of `put`'s parameters: a scalar of the struct, from a nested struct when [nested]. */
@@ -296,38 +196,6 @@ object StructBuilderGenerator {
                 structClass, structClass.simpleName, flatten(struct, "this", structs, fromSpec = false).joinToString(", "),
             )
             .build()
-
-    /** The 0.4.0 way to make a struct value. Kept for one release so existing code still compiles. */
-    private fun deprecatedBuild(struct: StructDef, structClass: ClassName, structs: Map<FbsTypeName, StructDef>): FunSpec {
-        val spec = TableBuilderGenerator.specClassName(struct.type)
-        val args = parameters(struct).joinToString(", ") { it.name }
-        return FunSpec.builder("build")
-            .addKdoc("Creates a standalone %T value in a buffer of its own.", structClass)
-            .addAnnotation(
-                AnnotationSpec.builder(Deprecated::class)
-                    .addMember(
-                        "%S",
-                        "Allocates a FlatBufferBuilder per struct. Table builders take ${spec.simpleName} instead, " +
-                            "which they write inline.",
-                    )
-                    .addMember("ReplaceWith(%S, %S)", "${spec.simpleName}($args)", spec.canonicalName)
-                    .build()
-            )
-            .receiver(structClass.companion())
-            .addParameters(parameters(struct, specs = false))
-            .returns(structClass)
-            // The builder only hands out its buffer once finished, so finish it with the struct as
-            // the root, then find the struct through the root offset at the start of the buffer.
-            // Local names start with `_`, which no flatc field accessor does, so they can't clash.
-            .addStatement("val _builder = %T()", FLAT_BUFFER_BUILDER)
-            .addStatement(
-                "_builder.finish(%T.create%L(_builder, %L))",
-                structClass, structClass.simpleName, flatten(struct, null, structs, fromSpec = false).joinToString(", "),
-            )
-            .addStatement("val _buffer = _builder.dataBuffer()")
-            .addStatement("return %T().__assign(_buffer.position() + _buffer.getInt(_buffer.position()), _buffer)", structClass)
-            .build()
-    }
 
     /**
      * Expressions for every scalar in [struct], in the order flatc's `create<Struct>` takes them.

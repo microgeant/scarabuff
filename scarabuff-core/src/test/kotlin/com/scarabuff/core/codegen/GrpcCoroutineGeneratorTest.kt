@@ -50,8 +50,8 @@ class GrpcCoroutineGeneratorTest {
         assertThat(spec).contains("MethodDescriptor.newBuilder<EchoRequest, EchoResponse>()")
         assertThat(spec).contains("MethodDescriptor.MethodType.UNARY")
         assertThat(spec).contains("MethodDescriptor.generateFullMethodName(SERVICE_NAME, \"Echo\")")
-        assertThat(spec).contains("FlatbuffersUtils.marshaller(EchoRequest::class.java")
-        assertThat(spec).contains("EchoRequest.getRootAsEchoRequest(buffer)")
+        assertThat(spec).contains("setRequestMarshaller(TableMarshaller { EchoRequest.getRootAsEchoRequest(it) })")
+        assertThat(spec).doesNotContain("FlatbuffersUtils")
         assertThat(spec).doesNotContain("Grpc.get")
     }
 
@@ -192,5 +192,44 @@ class GrpcCoroutineGeneratorTest {
 
         assertThat(spec.packageName).isEmpty()
         assertThat(spec.toString()).contains("SERVICE_NAME: String = \"RootService\"")
+    }
+
+    @Test
+    fun `servers check requests with required fields before the implementation sees them`() {
+        val request = setOf(type("EchoRequest"))
+        val unary = GrpcCoroutineGenerator.generate(service("EchoService", "Echo", StreamingKind.UNARY), withRequired = request)
+            .toString().replace(Regex("""\s+"""), " ")
+        val bidi = GrpcCoroutineGenerator.generate(service("EchoService", "Chat", StreamingKind.BIDI), withRequired = request)
+            .toString().replace(Regex("""\s+"""), " ")
+
+        assertThat(unary).contains("private fun _checkRequired(request: EchoRequest): EchoRequest {")
+        assertThat(unary).contains("val missing = request.missingRequiredField() ?: return request")
+        assertThat(unary).contains(
+            "throw StatusException(Status.INVALID_ARGUMENT.withDescription(\"EchoRequest is missing required field \" + missing))"
+        )
+        assertThat(unary).contains("implementation = { request -> echo(_checkRequired(request)) }")
+        assertThat(bidi).contains("implementation = { requests -> chat(requests.map { _checkRequired(it) }) }")
+        assertThat(bidi).contains("import kotlinx.coroutines.flow.map")
+    }
+
+    @Test
+    fun `requests without required fields go straight to the implementation`() {
+        val spec = GrpcCoroutineGenerator.generate(service("EchoService", "Echo", StreamingKind.UNARY)).toString()
+
+        assertThat(spec).contains("implementation = ::echo")
+        assertThat(spec).doesNotContain("_checkRequired")
+    }
+
+    @Test
+    fun `the marshaller sends from the buffer's array at its offset, and reads in a loop`() {
+        val spec = GrpcCoroutineGenerator.generate(service("EchoService", "Echo", StreamingKind.UNARY)).toString()
+            .replace(Regex("""\s+"""), " ")
+
+        assertThat(spec).contains("private class TableMarshaller<T : Table>(")
+        assertThat(spec).contains("TableStream(buffer.array(), buffer.arrayOffset() + buffer.position(), buffer.remaining())")
+        assertThat(spec).contains("buffer.duplicate().get(copy)")
+        assertThat(spec).contains("while (read < exact.size)")
+        assertThat(spec).contains("private class TableStream(")
+        assertThat(spec).contains(") : InputStream(), Drainable, KnownLength {")
     }
 }

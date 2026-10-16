@@ -1,0 +1,41 @@
+namespace com.scarabuff.benchmark.fb;
+
+table Item {
+  id:long;
+  name:string;
+  score:double;
+  active:bool;
+}
+
+table Payload {
+  id:long;
+  title:string;
+  timestamp_ms:long;
+  items:[Item];
+}
+
+table Summary {
+  count:int;
+  sum:double;
+}
+
+// Numeric-only item as a struct: fixed layout, stored inline, no per-item table.
+struct NumItem {
+  id:long;
+  score:double;
+  active:bool;
+}
+
+table NumPayload {
+  id:long;
+  numericItems:[NumItem];
+}
+
+rpc_service StreamService {
+  Produce(Summary):Item (streaming: "server");
+  Echo(Item):Item (streaming: "bidi");
+}
+
+rpc_service BenchService {
+  Process(Payload):Summary;
+}

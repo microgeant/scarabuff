@@ -1,5 +1,5 @@
 {
-  description = "scarabuff dev environment: flatc pinned to FlatBuffers v25.2.10 (matching gradle/libs.versions.toml's flatbuffers-java/flatbuffers-java-grpc versions), plus JDK 17 and Gradle.";
+  description = "scarabuff dev environment: flatc pinned to FlatBuffers v25.2.10 (matching gradle/libs.versions.toml's flatbuffers-java version), plus JDK 17 and Gradle.";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
 

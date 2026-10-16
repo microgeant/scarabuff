@@ -18,6 +18,8 @@ jobs:
         run: |
           nix develop -c ./gradlew build
           nix develop -c bash -c 'cd example && ./gradlew test'
+          # Compiled only, so the benchmarks can't silently stop building; running them is manual.
+          nix develop -c bash -c 'cd benchmark && ./gradlew classes'
 
       # Builds example/ against the published plugin on every supported Gradle/Kotlin version,
       # with no FLATC set, so the plugin's flatc download is exercised too.

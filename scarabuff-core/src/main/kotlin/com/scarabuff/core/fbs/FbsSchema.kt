@@ -75,7 +75,15 @@ sealed interface FieldKind {
     data class TableVector(val element: FbsTypeName) : FieldKind
     data class Struct(val type: FbsTypeName) : FieldKind
     data class StructVector(val element: FbsTypeName) : FieldKind
+    /**
+     * A union of tables, [type] being the union itself (flatc's class of type constants). Stored
+     * as two fields: a hidden `<name>_type` tag and the member table.
+     */
+    data class Union(val type: FbsTypeName, val members: List<UnionMember>) : FieldKind
 }
+
+/** One table in a union: [name] is flatc's constant for it, [value] the tag stored for it. */
+data class UnionMember(val name: String, val value: Int, val table: FbsTypeName)
 
 data class FieldDef(
     /** The name as written in the schema, e.g. `created_at`. */

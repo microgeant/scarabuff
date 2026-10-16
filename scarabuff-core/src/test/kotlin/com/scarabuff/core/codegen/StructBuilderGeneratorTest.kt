@@ -42,12 +42,8 @@ class StructBuilderGeneratorTest {
     }
 
     @Test
-    fun `the 0_4_0 build is kept, deprecated, with its old signature`() {
-        val code = generate(pose)
-
-        assertThat(code).contains("@Deprecated(")
-        assertThat(code).contains("fun Pose.Companion.build(position: Vec2, is_: Boolean): Pose")
-        assertThat(code).contains("_builder.finish(Pose.createPose(_builder, position.x, position.y, is_))")
+    fun `the 0_4_0 build is gone, as 0_5_0 announced`() {
+        assertThat(generate(pose)).doesNotContain("fun Pose.Companion.build(")
     }
 
     @Test
