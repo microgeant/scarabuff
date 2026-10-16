@@ -184,6 +184,63 @@ class BuildersTest {
     }
 
     @Test
+    fun `a struct Vector writes the same bytes as a list of specs, and reads as one`() {
+        val list = List(100) { NumItemSpec(it.toLong(), it * 0.5, it % 3 == 0) }
+        val vector = NumItemSpec.Vector(100) { i -> put(i.toLong(), i * 0.5, i % 3 == 0) }
+
+        assertThat(NumPayload.buildBytes(id = 1, items = vector)).isEqualTo(NumPayload.buildBytes(id = 1, items = list))
+        assertThat(vector).isEqualTo(list)
+        assertThat(NumPayloadSpec(id = 1, items = vector)).isEqualTo(NumPayloadSpec(id = 1, items = list))
+        assertThat(NumPayloadSpec(id = 1, items = vector).build().toSpec()).isEqualTo(NumPayloadSpec(id = 1, items = list))
+        assertThat(NumItemSpec.Vector(0) { error("never called") }).isEmpty()
+    }
+
+    @Test
+    fun `a struct Vector flattens nested structs into put`() {
+        val pose = PoseSpec(Vec2Spec(0f, 0f), 0.0, Color.Red, false)
+        val list = List(5) { PoseSpec(Vec2Spec(it * 1f, -it * 1f), it * 0.25, if (it % 2 == 0) Color.Green else Color.Red, it > 2) }
+        val vector = PoseSpec.Vector(5) { i ->
+            put(positionX = i * 1f, positionY = -i * 1f, angle = i * 0.25, color = if (i % 2 == 0) Color.Green else Color.Red, visible = i > 2)
+        }
+
+        assertThat(Shapes.buildBytes(pose = pose, poses = vector)).isEqualTo(Shapes.buildBytes(pose = pose, poses = list))
+        assertThat(Shapes.build(pose = pose, poses = vector).toSpec().poses).isEqualTo(list)
+    }
+
+    @Test
+    fun `a struct Vector's fill must put exactly once per index`() {
+        val twice = NumItemSpec.Vector(2) { i -> put(i.toLong(), 0.0, true); put(i.toLong(), 0.0, true) }
+        val never = NumItemSpec.Vector(2) { }
+
+        for (vector in listOf(twice, never)) {
+            val error = runCatching { NumPayload.buildBytes(items = vector) }.exceptionOrNull()
+            assertThat(error).isInstanceOf(IllegalStateException::class.java)
+            assertThat(error).hasMessageThat().contains("index 1")
+        }
+        assertThat(runCatching { twice[0] }.exceptionOrNull()).isInstanceOf(IllegalStateException::class.java)
+        assertThat(runCatching { never[5] }.exceptionOrNull()).isInstanceOf(IndexOutOfBoundsException::class.java)
+    }
+
+    @Test
+    fun `writing a struct Vector allocates nothing per struct`() {
+        val threads = java.lang.management.ManagementFactory.getThreadMXBean() as com.sun.management.ThreadMXBean
+        val scores = DoubleArray(1000) { it * 0.5 }
+        val builder = FlatBufferBuilder(32 * 1024)
+        fun encode(): Int = NumPayload.build(
+            id = 1, items = NumItemSpec.Vector(scores.size) { i -> put(i.toLong(), scores[i], i % 2 == 0) }, builder = builder,
+        ).itemsLength
+        repeat(2_000) { encode() }
+
+        val runs = 200
+        val before = threads.currentThreadAllocatedBytes
+        repeat(runs) { encode() }
+        val perMessage = (threads.currentThreadAllocatedBytes - before) / runs
+
+        // A spec per struct would be over 30 KB for 1000 of them; what's left is a few small objects.
+        assertWithMessage("bytes allocated per 1000-struct message").that(perMessage).isLessThan(1024L)
+    }
+
+    @Test
     fun `specs are data classes that round-trip through toSpec`() {
         val spec = AllSpec(
             someText = "spec",

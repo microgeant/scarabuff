@@ -4,6 +4,22 @@ All notable changes to scarabuff. The format follows [Keep a Changelog](https://
 and versions follow the policy in the README's [Versioning](README.md#versioning) section: before
 1.0, a minor release (0.x.0) may break things, and always says so here first, with how to migrate.
 
+## [Unreleased]
+
+### Added
+
+- **`<Struct>Spec.Vector`, struct vectors without an object per struct:**
+  `NumItemSpec.Vector(n) { i -> put(ids[i], scores[i], flags[i]) }`. It's a `List<NumItemSpec>`,
+  so it goes wherever one does, and table builders write its structs straight into the buffer.
+  Nested structs' fields are flattened into `put`'s parameters. Measured with JMH, encoding 1000
+  structs: 4.8 µs and 48 KB, against 8.5 µs and 84 KB for a list of specs, and 4.6 µs and 48 KB for
+  hand-written flatc code.
+
+### Changed
+
+- **Table builders write struct vectors with an index loop** instead of `asReversed().forEach`,
+  through the generated `<Struct>Spec.Vector.writeElements`. The wire format is unchanged.
+
 ## [0.5.1] - 2026-10-16
 
 ### Changed

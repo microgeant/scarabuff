@@ -189,6 +189,17 @@ val again: Post = Post.fromBytes(bytes)
   every `Vec2Spec` property is required.
 - **Lists:** vectors take a `List` (`List<Int>`, `List<String>`, `List<UserSpec>`,
   `List<Vec2Spec>`, ...).
+- **Struct vectors without an object per struct:** `Vec2Spec.Vector(n) { i -> put(xs[i], ys[i]) }`
+  is a `List<Vec2Spec>` whose elements are produced while the message is written, so a 1000-struct
+  vector costs what hand-written flatc code does. `put` takes the struct's scalars, with nested
+  structs flattened (`put(positionX, positionY, angle)`). The callback must call `put` exactly once
+  per index, with the same values each time: it runs from the last index to the first, and again
+  whenever the list is read. It still reads, compares and prints like any list of specs.
+
+  ```kotlin
+  val route = Vec2Spec.Vector(xs.size) { i -> put(xs[i], ys[i]) }
+  Post.build(route = route)
+  ```
 - **Builder size and reuse:** by default, `build` and `buildBytes` start the builder at an estimate
   of the message's size, computed from the values you pass. That avoids both FlatBufferBuilder's
   flat 1 KB for small messages and repeated growth for large ones. The optional last argument,
@@ -328,12 +339,20 @@ machine, so compare them with each other rather than with the table above:
 
 Since 0.5.0, builders write nested messages and structs into one buffer (see
 [Building messages](#building-messages)). They're within about 15% of hand-written code for
-tables, and about 1.5× for struct vectors, where the remaining cost is the spec objects.
+tables. For struct vectors, a list of specs costs about 1.8× hand-written code, all of it the spec
+objects; `<Struct>Spec.Vector` removes them. Measured with JMH, encoding 1000 structs:
+
+| Encode 1000 structs | time | allocated |
+|---|---|---|
+| `List<NumItemSpec>` | 8.5 µs | 84 KB |
+| `NumItemSpec.Vector` | 4.8 µs | 48 KB |
+| hand-written flatc code | 4.6 µs | 48 KB |
+| Protocol Buffers, repeated message | 11.7 µs | 76 KB |
 
 ### Getting the most out of it
 
 - **Put numeric data in structs.** That's where FlatBuffers wins most clearly, on both encode and
-  decode.
+  decode. Build large struct vectors with `<Struct>Spec.Vector` when the data is already in arrays.
 - **Use narrower types,** such as `float` instead of `double` and `ushort` instead of `int`, where
   the range allows. That shrinks messages, which are larger than Protocol Buffers'.
 - **Let the builders size themselves.** Since 0.5.1 they start at an estimate of each message's

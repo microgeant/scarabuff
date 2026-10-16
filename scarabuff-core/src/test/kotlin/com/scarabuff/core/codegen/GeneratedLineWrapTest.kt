@@ -8,6 +8,8 @@ import com.scarabuff.core.fbs.RpcMethod
 import com.scarabuff.core.fbs.RpcServiceDef
 import com.scarabuff.core.fbs.ScalarType
 import com.scarabuff.core.fbs.StreamingKind
+import com.scarabuff.core.fbs.StructDef
+import com.scarabuff.core.fbs.StructFieldDef
 import com.scarabuff.core.fbs.TableDef
 import org.junit.jupiter.api.Test
 
@@ -27,7 +29,7 @@ class GeneratedLineWrapTest {
      * is not, because the lambda is then read as a separate expression. So a `{` may only start a
      * line if the line before doesn't end in one of the lambda-taking calls the generators emit.
      */
-    private val lambdaCall = Regex("""(\blet|\bforEach|\blazy|\bIntArray\([^()]*\)|\bList\([^()]*\))$""")
+    private val lambdaCall = Regex("""(\blet|\bforEach|\blazy|\bwith\([^()]*\)|\bIntArray\([^()]*\)|\bList\([^()]*\))$""")
 
     private fun assertWrapsSafely(code: String, context: String) {
         val lines = code.lines()
@@ -76,6 +78,27 @@ class GeneratedLineWrapTest {
                     )
                 }
             }
+        }
+    }
+
+    @Test
+    fun `struct specs and vectors wrap safely whatever the name lengths`() {
+        for (length in lengths) {
+            val inner = StructDef(
+                FbsTypeName("com.example.wrap", "In" + "n".repeat(length)),
+                listOf(StructFieldDef(name(length), FieldKind.Scalar(ScalarType.DOUBLE))),
+                byteSize = 8,
+            )
+            val outer = StructDef(
+                FbsTypeName("com.example.wrap", "Out" + "t".repeat(length)),
+                listOf(
+                    StructFieldDef(name(length) + "_a", FieldKind.Struct(inner.type)),
+                    StructFieldDef(name(length) + "_b", FieldKind.Scalar(ScalarType.ULONG)),
+                ),
+                byteSize = 16,
+            )
+            val structs = listOf(inner, outer).associateBy { it.type }
+            assertWrapsSafely(StructBuilderGenerator.generate(outer, structs).toString(), "names of length $length")
         }
     }
 
