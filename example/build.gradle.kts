@@ -30,6 +30,7 @@ dependencies {
     implementation("javax.annotation:javax.annotation-api:1.3.2")
 
     testImplementation("io.grpc:grpc-inprocess:$grpcVersion")
+    testImplementation("io.grpc:grpc-okhttp:$grpcVersion") // the Android transport, for StreamingBuilderReuseTest
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:$coroutinesVersion")
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.1")
     testImplementation("com.google.truth:truth:1.4.0")

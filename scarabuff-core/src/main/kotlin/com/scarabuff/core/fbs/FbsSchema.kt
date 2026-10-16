@@ -50,18 +50,18 @@ data class RpcServiceDef(
 }
 
 /** A FlatBuffers scalar, with the Kotlin types flatc's `--kotlin` output uses for it. */
-enum class ScalarType(val kotlinType: String, val arrayType: String) {
-    BOOL("Boolean", "BooleanArray"),
-    BYTE("Byte", "ByteArray"),
-    UBYTE("UByte", "UByteArray"),
-    SHORT("Short", "ShortArray"),
-    USHORT("UShort", "UShortArray"),
-    INT("Int", "IntArray"),
-    UINT("UInt", "UIntArray"),
-    LONG("Long", "LongArray"),
-    ULONG("ULong", "ULongArray"),
-    FLOAT("Float", "FloatArray"),
-    DOUBLE("Double", "DoubleArray"),
+enum class ScalarType(val kotlinType: String, val arrayType: String, val byteSize: Int) {
+    BOOL("Boolean", "BooleanArray", 1),
+    BYTE("Byte", "ByteArray", 1),
+    UBYTE("UByte", "UByteArray", 1),
+    SHORT("Short", "ShortArray", 2),
+    USHORT("UShort", "UShortArray", 2),
+    INT("Int", "IntArray", 4),
+    UINT("UInt", "UIntArray", 4),
+    LONG("Long", "LongArray", 8),
+    ULONG("ULong", "ULongArray", 8),
+    FLOAT("Float", "FloatArray", 4),
+    DOUBLE("Double", "DoubleArray", 8),
 }
 
 /** What a table field holds, limited to the kinds scarabuff can generate builders for. */
@@ -111,6 +111,8 @@ data class TableDef(
 data class StructDef(
     val type: FbsTypeName,
     val fields: List<StructFieldDef>,
+    /** Its encoded size in bytes, padding included, as flatc lays it out. */
+    val byteSize: Int,
 )
 
 data class StructFieldDef(

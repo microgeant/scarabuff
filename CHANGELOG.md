@@ -4,6 +4,32 @@ All notable changes to scarabuff. The format follows [Keep a Changelog](https://
 and versions follow the policy in the README's [Versioning](README.md#versioning) section: before
 1.0, a minor release (0.x.0) may break things, and always says so here first, with how to migrate.
 
+## [0.5.1] - 2026-10-16
+
+### Changed
+
+- **Builders start at an estimate of the message size,** computed from the values passed, instead
+  of a flat 1 KB. Measured with JMH against 0.5.0, interleaved on the same machine:
+  - small messages: one table item 25% faster with 56% less allocation; one struct 60% faster with
+    66% less
+  - 1000 items: 5–9% faster for tables and 13% for a struct vector, with about 30% less allocation
+
+  The estimate is cheap: a vector of tables uses its first element times the count. Passing your
+  own `builder` still overrides it.
+- **Streams allocate about a third less per message,** from the size estimate: 2.9 → 2.0 KB for a
+  server-streamed message and 6.1 → 4.3 KB for bidi (Protocol Buffers: 1.8 and 3.9 KB), at the same
+  speed.
+- **`<field>Equals` is about 30% faster** (JMH, 5 compares per item over 1000 items: 50 → 35 µs,
+  still allocation-free). It now compares straight on the message buffer inside the generated
+  `ScarabuffFieldAccess_<hash>` object: one presence check and no `ByteBuffer` slice per call.
+
+### Documentation
+
+- **When a builder can be reused across streamed messages:** only when each message is built
+  inside the flow gRPC collects, with no buffering, on Netty or OkHttp. It corrupts messages with
+  buffered flows and with the in-process transport. `StreamingBuilderReuseTest` in `example/`
+  checks the safe case over Netty and OkHttp on every build.
+
 ## [0.5.0] - 2026-10-16
 
 ### Breaking
@@ -94,6 +120,7 @@ and versions follow the policy in the README's [Versioning](README.md#versioning
   2026-10-14). It generates Kotlin coroutine gRPC stubs for all four call shapes from `.fbs`
   `rpc_service` definitions, as pure Kotlin. A standalone CLI is also included.
 
+[0.5.1]: https://github.com/microgeant/scarabuff/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/microgeant/scarabuff/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/microgeant/scarabuff/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/microgeant/scarabuff/compare/v0.2.0...v0.3.0

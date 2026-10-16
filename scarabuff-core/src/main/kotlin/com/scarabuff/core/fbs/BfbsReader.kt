@@ -54,6 +54,7 @@ object BfbsReader {
                         .map { struct.fields(it) }
                         .sortedBy { it.id() } // flatc's create<Struct> takes fields in declaration order
                         .map { field -> StructFieldDef(field.name(), structFieldKind(schema, struct, field)) },
+                    byteSize = struct.bytesize(),
                 )
             }
     }

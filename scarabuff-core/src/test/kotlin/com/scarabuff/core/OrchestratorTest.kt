@@ -1,6 +1,7 @@
 package com.scarabuff.core
 
 import com.google.common.truth.Truth.assertThat
+import com.scarabuff.core.codegen.FieldAccessGenerator
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.io.TempDir
@@ -162,11 +163,13 @@ class OrchestratorTest {
 
         val result = generate()
 
+        // Plus the access object the string helpers use (User.name is a string).
+        val access = FieldAccessGenerator.className(listOf("com.probe.msgs")).simpleName
         assertThat(result.generatedKotlinFiles.map { it.name })
-            .containsExactly("Vec2Builders.kt", "UserBuilders.kt", "PostBuilders.kt")
+            .containsExactly("Vec2Builders.kt", "UserBuilders.kt", "PostBuilders.kt", "$access.kt")
         val user = generated("com.probe.msgs.UserBuilders").replace(Regex("""\s+"""), " ")
         assertThat(user).contains(
-            "fun User.Companion.build( id: UInt = 0u, name: String, builder: FlatBufferBuilder = FlatBufferBuilder(), ): User"
+            "fun User.Companion.build( id: UInt = 0u, name: String, builder: FlatBufferBuilder = FlatBufferBuilder(User.sizeHint(name = name) + 20), ): User"
         )
         assertThat(user).contains("fun User.Companion.fromBytes(bytes: ByteArray): User")
         val vec2 = generated("com.probe.msgs.Vec2Builders")

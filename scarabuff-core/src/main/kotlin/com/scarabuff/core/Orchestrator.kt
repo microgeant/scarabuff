@@ -89,12 +89,12 @@ object Orchestrator {
             }
             val fieldAccess = FieldAccessGenerator.className(schema.tables.map { it.type.packageName }.distinct())
             val tables = withUnsupportedNesting(schema.tables, structs.keys)
-            // Only the string helpers of optional fields need it.
-            if (tables.any { table -> table.fields.any { it.kind == FieldKind.Str && !it.required } }) {
+            // Only the string helpers need it.
+            if (tables.any { table -> table.fields.any { it.kind == FieldKind.Str } }) {
                 write(FieldAccessGenerator.generate(fieldAccess))
             }
             for (table in tables) {
-                write(TableBuilderGenerator.generate(table, fieldAccess))
+                write(TableBuilderGenerator.generate(table, fieldAccess, tables.associateBy { it.type }, structs))
                 table.unsupportedReason?.let { tablesWithoutBuilders["${table.type.packageName}.${table.type.simpleName}"] = it }
             }
         }

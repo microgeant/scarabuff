@@ -52,6 +52,9 @@ class ScarabuffPluginFunctionalTest {
 
             dependencies {
                 testImplementation("io.grpc:grpc-inprocess:1.70.0")
+                // Real transports, for example/'s StreamingBuilderReuseTest.
+                testImplementation("io.grpc:grpc-netty:1.70.0")
+                testImplementation("io.grpc:grpc-okhttp:1.70.0")
                 testImplementation("org.junit.jupiter:junit-jupiter:5.10.1")
                 testImplementation("com.google.truth:truth:1.4.0")
                 testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.10.1")
@@ -94,7 +97,8 @@ class ScarabuffPluginFunctionalTest {
         assertThat(first.task(":test")?.outcome).isEqualTo(TaskOutcome.SUCCESS)
         // Make sure the fixture's own tests actually ran, not just that the task succeeded.
         assertThat(testCount("com.scarabuff.example.EchoRoundTripTest")).isEqualTo(5)
-        assertThat(testCount("com.probe.builders.BuildersTest")).isEqualTo(14)
+        assertThat(testCount("com.scarabuff.example.StreamingBuilderReuseTest")).isEqualTo(3)
+        assertThat(testCount("com.probe.builders.BuildersTest")).isEqualTo(15)
 
         val second = runner(gradleVersion, "test", "--configuration-cache").build()
         assertThat(second.output).contains("Configuration cache entry reused")

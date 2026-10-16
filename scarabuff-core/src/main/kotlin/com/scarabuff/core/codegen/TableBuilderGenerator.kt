@@ -4,6 +4,7 @@ import com.scarabuff.core.fbs.FbsTypeName
 import com.scarabuff.core.fbs.FieldDef
 import com.scarabuff.core.fbs.FieldKind
 import com.scarabuff.core.fbs.ScalarType
+import com.scarabuff.core.fbs.StructDef
 import com.scarabuff.core.fbs.TableDef
 import com.squareup.kotlinpoet.ANY
 import com.squareup.kotlinpoet.AnnotationSpec
@@ -50,39 +51,6 @@ object TableBuilderGenerator {
     private val EXPERIMENTAL_UNSIGNED_TYPES = ClassName("kotlin", "ExperimentalUnsignedTypes")
     private val OPT_IN = ClassName("kotlin", "OptIn")
 
-    /**
-     * Compares UTF-8 bytes with a `String`: byte by byte while both are ASCII, then by encoding
-     * only the rest of [value]. Private to each generated file, so files never clash. Comments
-     * here must stay short: KotlinPoet wraps long lines, comments included.
-     */
-    private val UTF8_EQUALS = FunSpec.builder("scarabuffUtf8Equals")
-        .addModifiers(KModifier.PRIVATE)
-        .addParameter("bytes", BYTE_BUFFER)
-        .addParameter("value", STRING)
-        .returns(BOOLEAN)
-        .addCode(
-            """
-            |val start = bytes.position()
-            |val length = bytes.remaining()
-            |// Every char takes at least one UTF-8 byte, so a shorter byte run can't match.
-            |if (length < value.length) return false
-            |var i = 0
-            |while (i < length) {
-            |  val byte = bytes.get(start + i).toInt()
-            |  if (byte < 0) break // the first non-ASCII byte
-            |  if (i >= value.length || value[i].code != byte) return false
-            |  i++
-            |}
-            |if (i == length) return i == value.length
-            |// Earlier chars were one ASCII byte each, so the rests line up.
-            |val rest = value.substring(i).encodeToByteArray()
-            |if (rest.size != length - i) return false
-            |for (k in rest.indices) if (rest[k] != bytes.get(start + i + k)) return false
-            |return true
-            |""".trimMargin()
-        )
-        .build()
-
     /** The generated plain-value class for a table or struct: `User` gets `UserSpec`. */
     fun specClassName(type: FbsTypeName) = ClassName(type.packageName, "${type.simpleName}Spec")
 
@@ -90,14 +58,19 @@ object TableBuilderGenerator {
      * @param fieldAccess the generated [FieldAccessGenerator] object, which the string helpers use
      *   to check whether an optional field is present
      */
-    fun generate(table: TableDef, fieldAccess: ClassName = FieldAccessGenerator.className(emptyList())): FileSpec {
+    fun generate(
+        table: TableDef,
+        fieldAccess: ClassName = FieldAccessGenerator.className(emptyList()),
+        tables: Map<FbsTypeName, TableDef> = emptyMap(),
+        structs: Map<FbsTypeName, StructDef> = emptyMap(),
+    ): FileSpec {
         val tableClass = table.type.toClassName()
+        val sizing = Sizing(table, tables, structs)
         val file = FileSpec.builder(table.type.packageName, "${table.type.simpleName}Builders")
             .addFunction(fromBytes(tableClass))
         val strings = table.fields.filter { it.kind == FieldKind.Str }
         if (strings.isNotEmpty()) {
             strings.forEach { file.addFunction(stringEquals(it, tableClass, fieldAccess)) }
-            file.addFunction(UTF8_EQUALS)
         }
         if (table.unsupportedReason == null) {
             if (table.fields.any { it.usesUnsignedArray() }) {
@@ -112,10 +85,11 @@ object TableBuilderGenerator {
                 .filter { it != table.type.packageName }
                 .distinct()
                 .forEach { file.addImport(it, "toSpec") }
-            file.addType(spec(table, tableClass))
+            file.addType(spec(table, tableClass, sizing))
+            file.addFunction(sizeHint(tableClass, sizing))
             file.addFunction(pack(table, tableClass))
-            file.addFunction(build(table, tableClass, bytes = false))
-            file.addFunction(build(table, tableClass, bytes = true))
+            file.addFunction(build(table, tableClass, sizing, bytes = false))
+            file.addFunction(build(table, tableClass, sizing, bytes = true))
             file.addFunction(toSpec(table, tableClass))
             file.addFunction(copyInto(tableClass))
         }
@@ -133,9 +107,9 @@ object TableBuilderGenerator {
 
     /**
      * `<field>Equals(value)`: compares a string field without decoding it into a `String` (each
-     * read of flatc's accessor allocates one). flatc's `<field>AsByteBuffer` throws for an absent
-     * field, so an optional one is checked with [fieldAccess] first: catching that exception
-     * instead costs microseconds per call.
+     * read of flatc's accessor allocates one). The work happens in [fieldAccess], which reads the
+     * message buffer directly: one presence check and a byte compare, with no `ByteBuffer` slice.
+     * flatc's own `<field>AsByteBuffer` would also throw for an absent field.
      */
     private fun stringEquals(field: FieldDef, tableClass: ClassName, fieldAccess: ClassName): FunSpec {
         val name = field.kotlinName()
@@ -148,21 +122,15 @@ object TableBuilderGenerator {
             .receiver(tableClass)
             .addParameter("value", STRING.copy(nullable = true))
             .returns(BOOLEAN)
-        if (field.required) {
-            fn.addStatement("return value != null && scarabuffUtf8Equals(%LAsByteBuffer, value)", name)
-        } else {
-            // A field's vtable slot is at 4 + 2 * its id.
-            fn.addStatement("if (!%T.isPresent(this, %L)) return value == null", fieldAccess, 4 + 2 * field.id)
-                .addStatement("return value != null && scarabuffUtf8Equals(%LAsByteBuffer, value)", name)
-        }
-        return fn.build()
+        // A field's vtable slot is at 4 + 2 * its id.
+        return fn.addStatement("return %T.stringEquals(this, %L, value)", fieldAccess, 4 + 2 * field.id).build()
     }
 
     /**
      * `<Table>Spec`: a data class with one property per field. A table with no fields gets a plain
      * class instead, since a data class needs at least one property.
      */
-    private fun spec(table: TableDef, tableClass: ClassName): TypeSpec {
+    private fun spec(table: TableDef, tableClass: ClassName, sizing: Sizing): TypeSpec {
         val specClass = specClassName(table.type)
         val parameters = table.fields.map { it.parameter() }
         val forward = packArgs(table)
@@ -175,6 +143,14 @@ object TableBuilderGenerator {
             .primaryConstructor(FunSpec.constructorBuilder().addParameters(parameters).build())
             .addProperties(parameters.map { PropertySpec.builder(it.name, it.type).initializer(it.name).build() })
             .addFunction(
+                FunSpec.builder("sizeHint")
+                    .addModifiers(KModifier.INTERNAL)
+                    .addKdoc("An estimate of this message's encoded size, without its vtable; see `%T.sizeHint`.", tableClass)
+                    .returns(INT)
+                    .addStatement("return %T.sizeHint(%L)", tableClass, sizing.args())
+                    .build()
+            )
+            .addFunction(
                 FunSpec.builder("writeTo")
                     .addKdoc("Writes this message into [builder] and returns its offset.")
                     .addParameter("builder", FLAT_BUFFER_BUILDER)
@@ -185,7 +161,7 @@ object TableBuilderGenerator {
             .addFunction(
                 FunSpec.builder("build")
                     .addKdoc(buildKdoc(bytes = false), tableClass)
-                    .addParameter(builderParameter())
+                    .addParameter(builderParameter(CodeBlock.of("sizeHint() + %L", sizing.rootOverhead)))
                     .returns(tableClass)
                     .addStatement("return %T.build(%Lbuilder = builder)", tableClass, forward.suffixed())
                     .build()
@@ -193,7 +169,7 @@ object TableBuilderGenerator {
             .addFunction(
                 FunSpec.builder("buildBytes")
                     .addKdoc(buildKdoc(bytes = true), tableClass)
-                    .addParameter(builderParameter())
+                    .addParameter(builderParameter(CodeBlock.of("sizeHint() + %L", sizing.rootOverhead)))
                     .returns(BYTE_ARRAY)
                     .addStatement("return %T.buildBytes(%Lbuilder = builder)", tableClass, forward.suffixed())
                     .build()
@@ -297,7 +273,7 @@ object TableBuilderGenerator {
             .build()
     }
 
-    private fun build(table: TableDef, tableClass: ClassName, bytes: Boolean): FunSpec {
+    private fun build(table: TableDef, tableClass: ClassName, sizing: Sizing, bytes: Boolean): FunSpec {
         val finish = if (table.fileIdentifier != null) {
             CodeBlock.of("builder.finish(%T.pack(builder%L), %S)", tableClass, packArgs(table).prefixed(), table.fileIdentifier)
         } else {
@@ -307,7 +283,7 @@ object TableBuilderGenerator {
             .addKdoc(buildKdoc(bytes), tableClass)
             .receiver(tableClass.companion())
             .addParameters(table.fields.map { it.parameter() })
-            .addParameter(builderParameter())
+            .addParameter(builderParameter(CodeBlock.of("%T.sizeHint(%L) + %L", tableClass, sizing.args(), sizing.rootOverhead)))
             .returns(if (bytes) BYTE_ARRAY else tableClass)
             .addStatement("builder.clear()")
             .addStatement("%L", finish)
@@ -370,8 +346,100 @@ object TableBuilderGenerator {
      * `builder`, optional and last, so callers can presize or reuse it. No field can be called
      * `builder`: tables with one get no builders (see BfbsReader).
      */
-    private fun builderParameter() =
-        ParameterSpec.builder("builder", FLAT_BUFFER_BUILDER).defaultValue("%T()", FLAT_BUFFER_BUILDER).build()
+    private fun builderParameter(initialSize: CodeBlock) =
+        ParameterSpec.builder("builder", FLAT_BUFFER_BUILDER).defaultValue("%T(%L)", FLAT_BUFFER_BUILDER, initialSize).build()
+
+    /**
+     * `T.sizeHint(...)`: an estimate of a table's encoded size without its vtable, from the
+     * values of its variable-size fields, so builders can start at about the right size instead
+     * of FlatBufferBuilder's default 1 KB. A low estimate only means the builder grows, as it
+     * would anyway; strings count one byte per char, exact for ASCII.
+     *
+     * Kept cheap: a vector of tables is estimated from its first element times the count, so a
+     * 1000-item list doesn't pay for 1000 size computations. Locals start with `_`, which no
+     * field accessor does, so they can't shadow a parameter.
+     */
+    private fun sizeHint(tableClass: ClassName, sizing: Sizing): FunSpec {
+        val fn = FunSpec.builder("sizeHint")
+            .addModifiers(KModifier.INTERNAL)
+            .addKdoc(
+                "An estimate of a %T message's encoded size, without its vtable, used to size builders.",
+                tableClass,
+            )
+            .receiver(tableClass.companion())
+            .addParameters(sizing.variable.map { ParameterSpec.builder(it.kotlinName(), it.parameter().type).build() })
+            .returns(INT)
+            .addStatement("var _size = %L", sizing.fixed)
+        for (field in sizing.variable) {
+            val name = field.kotlinName()
+            val add = CodeBlock.builder()
+            when (val kind = field.kind) {
+                // Length prefix, null terminator and padding.
+                FieldKind.Str -> add.addStatement("_size += 8 + %L.length", name)
+                is FieldKind.Table -> add.addStatement("_size += %L.sizeHint() + %L", name, sizing.vtable(kind.type))
+                is FieldKind.ScalarVector ->
+                    add.addStatement("_size += 8 + %L * %L.size", kind.element.type.byteSize, name)
+                is FieldKind.StructVector ->
+                    add.addStatement("_size += 8 + %L * %L.size", sizing.structSize(kind.element), name)
+                FieldKind.StrVector -> add.addStatement("_size += 8 + 4 * %L.size", name)
+                    .addStatement("for (_s in %L) _size += 8 + _s.length", name)
+                is FieldKind.TableVector -> add.addStatement("_size += 8 + 4 * %L.size", name)
+                    .beginControlFlow("if (%L.isNotEmpty())", name)
+                    .addStatement("_size += %L.size * %L[0].sizeHint() + %L", name, name, sizing.vtable(kind.element))
+                    .endControlFlow()
+                else -> error("not variable-size: $kind")
+            }
+            if (field.required) {
+                fn.addCode(add.build())
+            } else {
+                fn.beginControlFlow("if (%L != null)", name).addCode(add.build()).endControlFlow()
+            }
+        }
+        return fn.addStatement("return _size").build()
+    }
+
+    /** What a table's size estimate is made of; see [sizeHint]. */
+    private class Sizing(
+        private val table: TableDef,
+        private val tables: Map<FbsTypeName, TableDef>,
+        private val structs: Map<FbsTypeName, StructDef>,
+    ) {
+        /** Fields whose encoded size depends on their value. */
+        val variable: List<FieldDef> = table.fields.filter {
+            it.kind !is FieldKind.Scalar && it.kind !is FieldKind.Struct
+        }
+
+        /**
+         * Everything that doesn't depend on values: the table's offset to its vtable, scalars and
+         * structs stored inline, a 4-byte offset per variable-size field, and alignment slack.
+         */
+        val fixed: Int = 4 + 8 + table.fields.sumOf { field ->
+            when (val kind = field.kind) {
+                is FieldKind.Scalar -> kind.type.byteSize
+                is FieldKind.Struct -> structSize(kind.type)
+                else -> 4
+            }
+        }
+
+        /** Added once for the message being built: its vtable, the root offset, alignment and identifier. */
+        val rootOverhead: Int = vtable(table) + 4 + 8 + if (table.fileIdentifier != null) 4 else 0
+
+        fun vtable(type: FbsTypeName): Int = tables[type]?.let { vtable(it) } ?: 32
+
+        // One 2-byte slot per field id, deprecated ones included, after the 4-byte header.
+        private fun vtable(table: TableDef): Int = 4 + 2 * ((table.fields.maxOfOrNull { it.id } ?: -1) + 1)
+
+        fun structSize(type: FbsTypeName): Int = structs[type]?.byteSize ?: 16
+
+        /** `a = a, b = b` for the variable-size fields, to call `sizeHint`. */
+        fun args(): CodeBlock = variable.map { CodeBlock.of("%L = %L", it.kotlinName(), it.kotlinName()) }.joinToCode()
+
+        private fun FieldDef.kotlinName() = FlatcNames.accessor(name)
+
+        private fun List<CodeBlock>.joinToCode(): CodeBlock = CodeBlock.builder().apply {
+            forEachIndexed { i, block -> if (i > 0) add(", "); add(block) }
+        }.build()
+    }
 
     private fun buildKdoc(bytes: Boolean) = if (bytes) {
         "Builds a finished %T message and returns a copy of its bytes.\n\n" +
