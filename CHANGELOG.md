@@ -69,6 +69,11 @@ and versions follow the policy in the README's [Versioning](README.md#versioning
 
 ### Fixed
 
+- **A Gradle 9 build can include an unreleased checkout** (`pluginManagement { includeBuild(...) }`),
+  to try changes before they're published. It used to fail on `HasConvention`, because
+  scarabuff's own build used Kotlin 1.9's Gradle plugin and Shadow 8.1. The build now uses Kotlin
+  2.2, still targeting Kotlin 1.9 so the plugin keeps running on Gradle 8.7, and
+  `com.gradleup.shadow` 8.3. Nothing changes for projects using the published plugin.
 - **Sending and receiving messages, in three cases** that `flatbuffers-java-grpc`'s marshaller, used
   until now, got wrong. Each `<Service>GrpcKt` now has its own marshaller, which still sends
   straight from the message's array, with no copy:

@@ -602,6 +602,11 @@ pluginManagement {
 }
 ```
 
+This works from Gradle 8.7 through Gradle 9, in Kotlin/JVM and Android projects. `example/` checks
+it on Gradle 8.7 and `benchmark/` on Gradle 9.1. A checkout from before 0.6.0 can't be included
+by a Gradle 9 build: its own build used Kotlin 1.9's Gradle plugin, which Gradle 9 no longer
+supports.
+
 ## Using the CLI
 
 For non-Gradle builds, build the CLI from source and point it at the same kind of schema

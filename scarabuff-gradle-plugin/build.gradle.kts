@@ -13,7 +13,7 @@ dependencies {
     implementation(project(":scarabuff-core"))
     shadow(libs.kotlinpoet)
     shadow(libs.flatbuffers.java)
-    compileOnly("org.jetbrains.kotlin:kotlin-gradle-plugin:${libs.versions.kotlin.get()}")
+    compileOnly("org.jetbrains.kotlin:kotlin-gradle-plugin:${libs.versions.kotlinGradlePluginApi.get()}")
     // The Android Gradle plugin's public variant API (see AndroidSupport). compileOnly: the
     // consuming build brings its own AGP. 8.1 is old enough to be readable by this build's Kotlin.
     compileOnly("com.android.tools.build:gradle-api:8.1.0")
