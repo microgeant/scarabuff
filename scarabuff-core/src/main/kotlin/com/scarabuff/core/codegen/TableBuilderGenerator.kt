@@ -15,6 +15,7 @@ import com.squareup.kotlinpoet.CodeBlock
 import com.squareup.kotlinpoet.FileSpec
 import com.squareup.kotlinpoet.FunSpec
 import com.squareup.kotlinpoet.INT
+import com.squareup.kotlinpoet.INT_ARRAY
 import com.squareup.kotlinpoet.KModifier
 import com.squareup.kotlinpoet.LIST
 import com.squareup.kotlinpoet.ParameterSpec
@@ -39,7 +40,8 @@ import com.squareup.kotlinpoet.TypeSpec
  *   fields as named arguments.
  * - `post.toSpec()`, to turn a received message into a spec (decoding it), and
  *   `post.copyInto(builder)` to re-serialize it into another message.
- * - `Post.fromBytes(bytes)`, which every table gets, even one with no builders.
+ * - `Post.fromBytes(bytes)` and `post.missingRequiredField()`, which every table gets, even one
+ *   with no builders.
  *
  * Required fields are non-null with no default; everything else defaults to the schema's default
  * (or null).
@@ -55,19 +57,26 @@ object TableBuilderGenerator {
     fun specClassName(type: FbsTypeName) = ClassName(type.packageName, "${type.simpleName}Spec")
 
     /**
-     * @param fieldAccess the generated [FieldAccessGenerator] object, which the string helpers use
-     *   to check whether an optional field is present
+     * @param fieldAccess the generated [FieldAccessGenerator] object, which the string helpers and
+     *   the required-field check use to see whether a field is present
+     * @param withRequired tables that have required fields, directly or in tables they nest; see
+     *   [withRequiredFields]
+     * @param unions the generated union interfaces ([UnionGenerator]) this table's spec implements,
+     *   as a member of those unions
      */
     fun generate(
         table: TableDef,
         fieldAccess: ClassName = FieldAccessGenerator.className(emptyList()),
         tables: Map<FbsTypeName, TableDef> = emptyMap(),
         structs: Map<FbsTypeName, StructDef> = emptyMap(),
+        withRequired: Set<FbsTypeName> = withRequiredFields(listOf(table)),
+        unions: List<ClassName> = emptyList(),
     ): FileSpec {
         val tableClass = table.type.toClassName()
         val sizing = Sizing(table, tables, structs)
         val file = FileSpec.builder(table.type.packageName, "${table.type.simpleName}Builders")
             .addFunction(fromBytes(tableClass))
+            .addFunction(missingRequiredField(table, tableClass, fieldAccess, withRequired))
         val strings = table.fields.filter { it.kind == FieldKind.Str }
         if (strings.isNotEmpty()) {
             strings.forEach { file.addFunction(stringEquals(it, tableClass, fieldAccess)) }
@@ -81,11 +90,11 @@ object TableBuilderGenerator {
             // Nested tables and structs from other namespaces have their toSpec in their own
             // package. KotlinPoet won't import a name this file also declares, so import it by
             // hand; Kotlin picks the overload by receiver type.
-            table.fields.mapNotNull { it.nestedType()?.packageName }
+            table.fields.flatMap { field -> field.nestedTypes().map { it.packageName } }
                 .filter { it != table.type.packageName }
                 .distinct()
                 .forEach { file.addImport(it, "toSpec") }
-            file.addType(spec(table, tableClass, sizing))
+            file.addType(spec(table, tableClass, sizing, unions))
             file.addFunction(sizeHint(tableClass, sizing))
             file.addFunction(pack(table, tableClass))
             file.addFunction(build(table, tableClass, sizing, bytes = false))
@@ -104,6 +113,89 @@ object TableBuilderGenerator {
             .returns(tableClass)
             .addStatement("return %T.getRootAs%L(%T.wrap(bytes))", tableClass, tableClass.simpleName, BYTE_BUFFER)
             .build()
+
+    /**
+     * The tables that need a required-field check: those with a required field, and those nesting
+     * one of them, through a table field or a vector of tables, repeated until nothing changes
+     * (schemas can nest tables recursively), including through union members.
+     */
+    fun withRequiredFields(tables: Collection<TableDef>): Set<FbsTypeName> {
+        val result = tables.filter { table -> table.fields.any { it.required } }.mapTo(mutableSetOf()) { it.type }
+        while (true) {
+            val more = tables.filter { table ->
+                table.type !in result && table.fields.any { field -> field.nestedTables().any { it in result } }
+            }
+            if (more.isEmpty()) return result
+            more.mapTo(result) { it.type }
+        }
+    }
+
+    /**
+     * `<table>.missingRequiredField()`: the path of the first required field missing from a
+     * received message, nested messages included (`items[2].name`), or null if there's none. flatc's
+     * accessor for a missing required field throws `AssertionError`, and FlatBuffers for Java has
+     * no verifier, so this is how to check a message that may come from an older schema or a
+     * hand-written sender. Presence is read from the vtable, with nothing decoded; nested tables
+     * are only visited if they have required fields of their own. Paths use the schema's names.
+     */
+    private fun missingRequiredField(
+        table: TableDef,
+        tableClass: ClassName,
+        fieldAccess: ClassName,
+        withRequired: Set<FbsTypeName>,
+    ): FunSpec {
+        val fn = FunSpec.builder("missingRequiredField")
+            .addKdoc(
+                "The first required field missing from this message, as a path through nested messages " +
+                    "(`items[2].name`), or null if every required field is present. Reading a missing required " +
+                    "field throws, so check messages from senders you don't control."
+            )
+            .receiver(tableClass)
+            .returns(STRING.copy(nullable = true))
+        if (table.type !in withRequired) return fn.addStatement("return null").build()
+        for (field in table.fields) {
+            val name = field.kotlinName()
+            if (field.required) {
+                // A field's vtable slot is at 4 + 2 * its id.
+                fn.addStatement("if (!%T.isPresent(this, %L)) return·%S", fieldAccess, 4 + 2 * field.id, field.name)
+            }
+            when (val kind = field.kind) {
+                is FieldKind.Table -> if (kind.type in withRequired) {
+                    fn.addStatement(
+                        "this.%L%L.missingRequiredField()?.let·{ return·%S + it }",
+                        name, if (field.required) "" else "?", "${field.name}.",
+                    )
+                }
+                is FieldKind.TableVector -> if (kind.element in withRequired) {
+                    // One reused view for every element, as flatc's two-argument accessor allows.
+                    fn.addStatement("val _%L = %T()", name, kind.element.toClassName())
+                    fn.beginControlFlow("for (_i in 0 until this.%LLength)", name)
+                    fn.addStatement(
+                        "this.%L(_%L, _i)!!.missingRequiredField()?.let·{ return·%S + _i + %S + it }",
+                        name, name, "${field.name}[", "].",
+                    )
+                    fn.endControlFlow()
+                }
+                // Only the member the type tag names is there to check.
+                is FieldKind.Union -> {
+                    val checked = kind.members.filter { it.table in withRequired }
+                    if (checked.isNotEmpty()) {
+                        fn.beginControlFlow("when (this.%L)", field.typeAccessor())
+                        for (member in checked) {
+                            fn.addStatement(
+                                "%T.%L -> (this.%L(%T()) as %T?)?.missingRequiredField()?.let·{ return·%S + it }",
+                                kind.type.toClassName(), member.name, name, member.table.toClassName(),
+                                member.table.toClassName(), "${field.name}.",
+                            )
+                        }
+                        fn.endControlFlow()
+                    }
+                }
+                else -> Unit
+            }
+        }
+        return fn.addStatement("return null").build()
+    }
 
     /**
      * `<field>Equals(value)`: compares a string field without decoding it into a `String` (each
@@ -130,7 +222,7 @@ object TableBuilderGenerator {
      * `<Table>Spec`: a data class with one property per field. A table with no fields gets a plain
      * class instead, since a data class needs at least one property.
      */
-    private fun spec(table: TableDef, tableClass: ClassName, sizing: Sizing): TypeSpec {
+    private fun spec(table: TableDef, tableClass: ClassName, sizing: Sizing, unions: List<ClassName>): TypeSpec {
         val specClass = specClassName(table.type)
         val parameters = table.fields.map { it.parameter() }
         val forward = packArgs(table)
@@ -142,6 +234,7 @@ object TableBuilderGenerator {
             )
             .primaryConstructor(FunSpec.constructorBuilder().addParameters(parameters).build())
             .addProperties(parameters.map { PropertySpec.builder(it.name, it.type).initializer(it.name).build() })
+            .addSuperinterfaces(unions)
             .addFunction(
                 FunSpec.builder("sizeHint")
                     .addModifiers(KModifier.INTERNAL)
@@ -153,6 +246,7 @@ object TableBuilderGenerator {
             .addFunction(
                 FunSpec.builder("writeTo")
                     .addKdoc("Writes this message into [builder] and returns its offset.")
+                    .apply { if (unions.isNotEmpty()) addModifiers(KModifier.OVERRIDE) }
                     .addParameter("builder", FLAT_BUFFER_BUILDER)
                     .returns(INT)
                     .addStatement("return %T.pack(builder%L)", tableClass, forward.prefixed())
@@ -174,6 +268,7 @@ object TableBuilderGenerator {
                     .addStatement("return %T.buildBytes(%Lbuilder = builder)", tableClass, forward.suffixed())
                     .build()
             )
+        type.addType(vector(table, tableClass, specClass, forward))
         if (table.fields.isEmpty()) {
             // What a data class would provide: all instances of an empty message are equal.
             type.addFunction(
@@ -193,6 +288,44 @@ object TableBuilderGenerator {
             type.addModifiers(KModifier.DATA)
         }
         return type.build()
+    }
+
+    /**
+     * `<Table>Spec.Vector`; see [SpecVectorGenerator]. `put` takes the same parameters as `build`,
+     * defaults included, so filling one reads like building each element.
+     */
+    private fun vector(table: TableDef, tableClass: ClassName, specClass: ClassName, forward: CodeBlock): TypeSpec {
+        val parameters = table.fields.map { it.parameter() }
+        val shown = parameters.take(2).joinToString(", ") { "${it.name} = …" } + if (parameters.size > 2) ", …" else ""
+        return SpecVectorGenerator.generate(
+            spec = specClass,
+            typeName = tableClass.simpleName,
+            kind = "message",
+            putParameters = parameters,
+            putKdoc = "Gives the message's fields, as `build` takes them.",
+            example = shown,
+            order = "from the first index to the last",
+            write = CodeBlock.of("%T.pack(_builder%L)", tableClass, forward.prefixed()),
+            record = CodeBlock.of("%T(%L)", specClass, forward),
+        ) { vector, writer ->
+            listOf(
+                FunSpec.builder("offsets")
+                    .addKdoc(
+                        "Writes [specs] into [builder] and returns their offsets, for a vector of them. A [%T] " +
+                            "writes without an object per message.",
+                        vector,
+                    )
+                    .addParameter("builder", FLAT_BUFFER_BUILDER)
+                    .addParameter("specs", LIST.parameterizedBy(specClass))
+                    .returns(INT_ARRAY)
+                    .beginControlFlow("if (specs is %T)", vector)
+                    .addStatement("val _writer = %T(builder)", writer)
+                    .addStatement("return IntArray(specs.size)·{·i·-> specs.write(_writer, i) }")
+                    .endControlFlow()
+                    .addStatement("return IntArray(specs.size)·{·i·-> specs[i].writeTo(builder) }")
+                    .build()
+            )
+        }
     }
 
     // Generated lambdas are glued to what precedes them with `·`, KotlinPoet's non-breaking space:
@@ -217,9 +350,10 @@ object TableBuilderGenerator {
                     "%T.create%LVector(builder, IntArray(it.size)·{·i·-> builder.createString(it[i]) })",
                     tableClass, field.vectorName(),
                 )
+                // Through the element's Vector, which writes without a spec per element when given one.
                 is FieldKind.TableVector -> CodeBlock.of(
-                    "%T.create%LVector(builder, IntArray(it.size)·{·i·-> it[i].writeTo(builder) })",
-                    tableClass, field.vectorName(),
+                    "%T.create%LVector(builder, %T.offsets(builder, it))",
+                    tableClass, field.vectorName(), specClassName(kind.element).nestedClass("Vector"),
                 )
                 // flatc has no create<Field>Vector for structs: they're written in place, last first,
                 // by the struct's generated Vector, without a spec per element when given one.
@@ -227,6 +361,16 @@ object TableBuilderGenerator {
                     "%T.start%LVector(builder, it.size); %T.writeElements(builder, it); builder.endVector()",
                     tableClass, field.vectorName(), StructBuilderGenerator.vectorClassName(kind.element),
                 )
+                // The member table, and separately its type tag (see typeVal).
+                is FieldKind.Union -> {
+                    val tag = CodeBlock.of("%T.typeOf(it)", UnionGenerator.specClassName(kind))
+                    if (field.required) {
+                        body.addStatement("val %L = %L.let·{ %L }", typeVal(field), name, tag)
+                    } else {
+                        body.addStatement("val %L = %L?.let·{ %L }", typeVal(field), name, tag)
+                    }
+                    CodeBlock.of("it.writeTo(builder)")
+                }
             }
             if (field.required) {
                 body.addStatement("val %L = %L.let·{ %L }", offset, name, create)
@@ -252,6 +396,14 @@ object TableBuilderGenerator {
                     body.addStatement("%T.%L(builder, %L.writeTo(builder))", tableClass, add, field.kotlinName())
                 field.kind is FieldKind.Struct ->
                     body.addStatement("%L?.let·{ %T.%L(builder, it.writeTo(builder)) }", field.kotlinName(), tableClass, add)
+                field.kind is FieldKind.Union && field.required -> {
+                    body.addStatement("%T.add%L(builder, %L)", tableClass, field.typeAccessor().capitalized(), typeVal(field))
+                    body.addStatement("%T.%L(builder, %L)", tableClass, add, offsetVal(field))
+                }
+                field.kind is FieldKind.Union -> {
+                    body.addStatement("%L?.let·{ %T.add%L(builder, it) }", typeVal(field), tableClass, field.typeAccessor().capitalized())
+                    body.addStatement("%L?.let·{ %T.%L(builder, it) }", offsetVal(field), tableClass, add)
+                }
                 field.required ->
                     body.addStatement("%T.%L(builder, %L)", tableClass, add, offsetVal(field))
                 else ->
@@ -304,6 +456,24 @@ object TableBuilderGenerator {
                 // flatc's accessors for required fields are non-null (and throw if the field is missing).
                 is FieldKind.Table, is FieldKind.Struct ->
                     CodeBlock.of(if (field.required) "this.%L.toSpec()" else "this.%L?.toSpec()", name)
+                // The member the type tag names. An unknown tag, from a newer schema, reads as absent.
+                is FieldKind.Union -> {
+                    val unionClass = field.kind.type.toClassName()
+                    val block = CodeBlock.builder().add("when (this.%L) {\n", field.typeAccessor()).indent()
+                    for (member in field.kind.members) {
+                        block.add(
+                            "%T.%L -> (this.%L(%T()) as %T?)?.toSpec()\n",
+                            unionClass, member.name, name, member.table.toClassName(), member.table.toClassName(),
+                        )
+                    }
+                    if (field.required) {
+                        block.add("else -> error(%P)\n", "${field.name} has unknown type \${this.${field.typeAccessor()}}")
+                    } else {
+                        block.add("else -> null\n")
+                    }
+                    val value = block.unindent().add("}").build()
+                    if (field.required) CodeBlock.of("checkNotNull(%L)", value) else value
+                }
                 is FieldKind.ScalarVector, FieldKind.StrVector, is FieldKind.TableVector, is FieldKind.StructVector -> {
                     // Elements of string, table and struct vectors are never null in a valid buffer.
                     val element = when (field.kind) {
@@ -388,6 +558,7 @@ object TableBuilderGenerator {
                     .beginControlFlow("if (%L.isNotEmpty())", name)
                     .addStatement("_size += %L.size * %L[0].sizeHint() + %L", name, name, sizing.vtable(kind.element))
                     .endControlFlow()
+                is FieldKind.Union -> add.addStatement("_size += %T.sizeHint(%L)", UnionGenerator.specClassName(kind), name)
                 else -> error("not variable-size: $kind")
             }
             if (field.required) {
@@ -398,6 +569,12 @@ object TableBuilderGenerator {
         }
         return fn.addStatement("return _size").build()
     }
+
+    /**
+     * The size of [table]'s vtable: one 2-byte slot per field id, deprecated ones included, after
+     * the 4-byte header. Union fields' hidden type fields are included through the ids.
+     */
+    fun vtableSize(table: TableDef): Int = 4 + 2 * ((table.fields.maxOfOrNull { it.id } ?: -1) + 1)
 
     /** What a table's size estimate is made of; see [sizeHint]. */
     private class Sizing(
@@ -423,12 +600,9 @@ object TableBuilderGenerator {
         }
 
         /** Added once for the message being built: its vtable, the root offset, alignment and identifier. */
-        val rootOverhead: Int = vtable(table) + 4 + 8 + if (table.fileIdentifier != null) 4 else 0
+        val rootOverhead: Int = vtableSize(table) + 4 + 8 + if (table.fileIdentifier != null) 4 else 0
 
-        fun vtable(type: FbsTypeName): Int = tables[type]?.let { vtable(it) } ?: 32
-
-        // One 2-byte slot per field id, deprecated ones included, after the 4-byte header.
-        private fun vtable(table: TableDef): Int = 4 + 2 * ((table.fields.maxOfOrNull { it.id } ?: -1) + 1)
+        fun vtable(type: FbsTypeName): Int = tables[type]?.let { vtableSize(it) } ?: 32
 
         fun structSize(type: FbsTypeName): Int = structs[type]?.byteSize ?: 16
 
@@ -490,6 +664,7 @@ object TableBuilderGenerator {
         is FieldKind.TableVector -> LIST.parameterizedBy(specClassName(element))
         is FieldKind.Struct -> specClassName(type)
         is FieldKind.StructVector -> LIST.parameterizedBy(specClassName(element))
+        is FieldKind.Union -> UnionGenerator.specClassName(this)
     }
 
     /** FlatBufferBuilder's untyped-slot `add` call for a scalar named `it`. */
@@ -507,14 +682,25 @@ object TableBuilderGenerator {
         ScalarType.DOUBLE -> "addDouble(it)"
     }
 
-    /** A table or struct this field holds, whose generated spec and toSpec the builders use. */
-    private fun FieldDef.nestedType(): FbsTypeName? = when (val kind = kind) {
-        is FieldKind.Table -> kind.type
-        is FieldKind.TableVector -> kind.element
-        is FieldKind.Struct -> kind.type
-        is FieldKind.StructVector -> kind.element
-        else -> null
+    /** The tables this field can hold: alone, as a vector's elements, or as a union's members. */
+    private fun FieldDef.nestedTables(): List<FbsTypeName> = when (val kind = kind) {
+        is FieldKind.Table -> listOf(kind.type)
+        is FieldKind.TableVector -> listOf(kind.element)
+        is FieldKind.Union -> kind.members.map { it.table }
+        else -> emptyList()
     }
+
+    /** The tables and structs this field can hold, whose generated spec and toSpec the builders use. */
+    private fun FieldDef.nestedTypes(): List<FbsTypeName> = when (val kind = kind) {
+        is FieldKind.Struct -> listOf(kind.type)
+        is FieldKind.StructVector -> listOf(kind.element)
+        else -> nestedTables()
+    }
+
+    /** flatc's accessor for a union's hidden `<name>_type` field: `payloadType`. */
+    private fun FieldDef.typeAccessor(): String = FlatcNames.accessor("${name}_type")
+
+    private fun String.capitalized() = replaceFirstChar { it.uppercaseChar() }
 
     private fun FieldDef.usesUnsignedArray(): Boolean {
         val vector = kind as? FieldKind.ScalarVector ?: return false
@@ -530,6 +716,9 @@ object TableBuilderGenerator {
 
     /** Field names never contain `_` after camel-casing (bar a keyword suffix), so this can't clash. */
     private fun offsetVal(field: FieldDef) = "o_${field.kotlinName()}"
+
+    /** A union's type tag, worked out with its offset (see [offsetVal]). */
+    private fun typeVal(field: FieldDef) = "t_${field.kotlinName()}"
 
     private fun List<CodeBlock>.joinToCode(): CodeBlock = CodeBlock.builder().apply {
         forEachIndexed { i, block -> if (i > 0) add(", "); add(block) }

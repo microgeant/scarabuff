@@ -98,11 +98,44 @@ class ScarabuffPluginFunctionalTest {
         // Make sure the fixture's own tests actually ran, not just that the task succeeded.
         assertThat(testCount("com.scarabuff.example.EchoRoundTripTest")).isEqualTo(5)
         assertThat(testCount("com.scarabuff.example.StreamingBuilderReuseTest")).isEqualTo(3)
-        assertThat(testCount("com.probe.builders.BuildersTest")).isEqualTo(19)
+        assertThat(testCount("com.scarabuff.example.RequiredFieldsTest")).isEqualTo(4)
+        assertThat(testCount("com.scarabuff.example.MarshallerTest")).isEqualTo(3)
+        assertThat(testCount("com.probe.builders.BuildersTest")).isEqualTo(23)
 
         val second = runner(gradleVersion, "test", "--configuration-cache").build()
         assertThat(second.output).contains("Configuration cache entry reused")
         assertThat(second.task(":generateScarabuffSources")?.outcome).isEqualTo(TaskOutcome.UP_TO_DATE)
+    }
+
+    /**
+     * The other FlatBuffers version scarabuff supports: selecting it must switch both the runtime
+     * jar and flatc, and everything must still pass.
+     */
+    @Test
+    fun `an older FlatBuffers version works when flatbuffersVersion selects it`() {
+        fixture(
+            "2.4.21",
+            """
+            scarabuff { flatbuffersVersion.set("24.3.25") }
+            tasks.register("printFlatbuffersJava") {
+                val version = configurations.named("compileClasspath").map { classpath ->
+                    classpath.incoming.resolutionResult.allComponents
+                        .mapNotNull { it.moduleVersion }.single { it.name == "flatbuffers-java" }.version
+                }
+                doLast { println("flatbuffers-java " + version.get()) }
+            }
+            """.trimIndent(),
+        )
+
+        val result = runner("9.8.1", "test", "printFlatbuffersJava").build()
+
+        assertThat(result.output).contains("flatbuffers-java 24.3.25")
+        // flatc's output checks the runtime matches the compiler that wrote it.
+        val generated = projectDir.resolve("build").walk().first { it.name == "Strict.kt" }.readText()
+        assertThat(generated).contains("Constants.FLATBUFFERS_24_3_25()")
+        assertThat(testCount("com.scarabuff.example.EchoRoundTripTest")).isEqualTo(5)
+        assertThat(testCount("com.scarabuff.example.RequiredFieldsTest")).isEqualTo(4)
+        assertThat(testCount("com.probe.builders.BuildersTest")).isEqualTo(23)
     }
 
     @Test

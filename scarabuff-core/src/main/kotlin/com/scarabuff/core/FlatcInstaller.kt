@@ -25,13 +25,32 @@ object FlatcInstaller {
     data class Asset(val fileName: String, val sha256: String, val executable: String)
 
     /**
-     * Release assets from https://github.com/google/flatbuffers/releases. The Mac and Linux hashes
-     * match the ones pinned independently in this repo's flake.nix; Windows was hashed from the
-     * release download.
+     * Release assets from https://github.com/google/flatbuffers/releases, one entry per FlatBuffers
+     * version whose `flatbuffers-java` is on Maven Central. For 25.2.10, the Mac and Linux hashes
+     * match the ones pinned independently in this repo's flake.nix, and Windows was hashed from the
+     * release download. 24.3.25's were all hashed from the release download.
      *
-     * To add a version: download each asset, `shasum -a 256` it, and add an entry here.
+     * To add a version, see "Supporting another FlatBuffers version" in the README.
      */
     val RELEASES: Map<String, Map<Platform, Asset>> = mapOf(
+        "24.3.25" to mapOf(
+            // Universal binary, as for 25.2.10.
+            Platform.MAC to Asset(
+                "Mac.flatc.binary.zip",
+                "277274f4e1037dbb57b1b95719721fe3d58c86983d634103284ad8c1d9cf19dd",
+                "flatc",
+            ),
+            Platform.LINUX_X64 to Asset(
+                "Linux.flatc.binary.g++-13.zip",
+                "af4783514309c833216b280914ecc1c993aedb1c2b476f4d499ecbf8c372920e",
+                "flatc",
+            ),
+            Platform.WINDOWS_X64 to Asset(
+                "Windows.flatc.binary.zip",
+                "6455f5b6272b908dad073721e21b11720a9fddbae06e28b5c75f8ec458e7fe30",
+                "flatc.exe",
+            ),
+        ),
         "25.2.10" to mapOf(
             // Universal binary: covers both Intel and Apple Silicon.
             Platform.MAC to Asset(
@@ -86,12 +105,7 @@ object FlatcInstaller {
                 "Use one of those FlatBuffers versions, or point scarabuff at your own flatc $version with " +
                 "scarabuff { flatc.set(\"/path/to/flatc\") } or the FLATC environment variable."
         )
-        val asset = platform?.let { assets[it] } ?: throw IllegalArgumentException(
-            "There's no official flatc $version binary for this platform " +
-                "(${System.getProperty("os.name")} ${System.getProperty("os.arch")}). " +
-                "Build or install flatc $version yourself and set scarabuff { flatc.set(\"/path/to/flatc\") } " +
-                "or the FLATC environment variable."
-        )
+        val asset = platform?.let { assets[it] } ?: throw IllegalArgumentException(noBinaryMessage(version))
 
         val installDir = cacheDir.resolve(version).resolve(platform.name.lowercase())
         val target = installDir.resolve(asset.executable)
@@ -109,6 +123,28 @@ object FlatcInstaller {
         }
         return target
     }
+
+    /**
+     * What to do on a platform FlatBuffers publishes no `flatc` for, such as Linux ARM: build the
+     * matching version from source, which takes a few minutes with CMake and a C++ compiler.
+     */
+    fun noBinaryMessage(
+        version: String,
+        osName: String = System.getProperty("os.name"),
+        osArch: String = System.getProperty("os.arch"),
+    ): String =
+        """
+        |There's no official flatc $version binary for this platform ($osName $osArch). Build it from source
+        |(it must be exactly $version, to match flatbuffers-java), then point scarabuff at it:
+        |
+        |    git clone --depth 1 --branch v$version https://github.com/google/flatbuffers.git
+        |    cmake -S flatbuffers -B flatbuffers/build -DCMAKE_BUILD_TYPE=Release -DFLATBUFFERS_BUILD_TESTS=OFF
+        |    cmake --build flatbuffers/build --target flatc --parallel
+        |    export FLATC=${'$'}PWD/flatbuffers/build/flatc
+        |
+        |or set scarabuff { flatc.set("/path/to/flatc") }. Distribution packages (apt's flatbuffers-compiler) are
+        |usually another version, and code from a mismatched flatc doesn't compile against the runtime.
+        """.trimMargin()
 
     /** Streams the zip once: hashes every byte while extracting the executable entry. */
     private fun extractVerified(input: InputStream, asset: Asset, url: URI, destination: File) {

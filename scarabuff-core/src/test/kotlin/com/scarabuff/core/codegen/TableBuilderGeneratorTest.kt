@@ -254,4 +254,78 @@ class TableBuilderGeneratorTest {
         // Root overhead: this table's vtable (4 + 2 * 4 slots), root offset and alignment.
         assertThat(code).contains("FlatBufferBuilder(Msg.sizeHint(title = title, path = path, items = items) + 24)")
     }
+
+    @Test
+    fun `missingRequiredField checks presence, then nested tables that have required fields`() {
+        val inner = TableDef(FbsTypeName(pkg, "Inner"), listOf(field("label", FieldKind.Str, required = true)), null, null)
+        val msg = table(
+            field("name", FieldKind.Str, id = 0, required = true),
+            field("inner", FieldKind.Table(inner.type), id = 1),
+            field("first", FieldKind.Table(inner.type), id = 2, required = true),
+            field("items", FieldKind.TableVector(inner.type), id = 3),
+            field("count", FieldKind.Scalar(ScalarType.INT), id = 4),
+        )
+        val withRequired = TableBuilderGenerator.withRequiredFields(listOf(inner, msg))
+
+        val code = TableBuilderGenerator.generate(msg, withRequired = withRequired).toString().replace(Regex("""\s+"""), " ")
+
+        assertThat(code).contains("public fun Msg.missingRequiredField(): String? {")
+        assertThat(code).contains("if (!ScarabuffFieldAccess_00000000.isPresent(this, 4)) return \"name\"")
+        assertThat(code).contains("this.inner?.missingRequiredField()?.let { return \"inner.\" + it }")
+        assertThat(code).contains("if (!ScarabuffFieldAccess_00000000.isPresent(this, 8)) return \"first\"")
+        assertThat(code).contains("this.first.missingRequiredField()?.let { return \"first.\" + it }")
+        assertThat(code).contains("val _items = Inner() for (_i in 0 until this.itemsLength) {")
+        assertThat(code).contains("this.items(_items, _i)!!.missingRequiredField()?.let { return \"items[\" + _i + \"].\" + it }")
+        assertThat(code).doesNotContain("isPresent(this, 12)")
+    }
+
+    @Test
+    fun `tables without required fields, even nested ones, skip the check`() {
+        val plain = TableDef(FbsTypeName(pkg, "Plain"), listOf(field("label", FieldKind.Str)), null, null)
+        val msg = table(field("plain", FieldKind.Table(plain.type)), field("items", FieldKind.TableVector(plain.type), id = 1))
+
+        val code = TableBuilderGenerator.generate(msg, withRequired = TableBuilderGenerator.withRequiredFields(listOf(plain, msg)))
+            .toString().replace(Regex("""\s+"""), " ")
+
+        assertThat(code).contains("public fun Msg.missingRequiredField(): String? = null")
+    }
+
+    @Test
+    fun `required fields propagate through nesting, recursive schemas included`() {
+        val leaf = TableDef(FbsTypeName(pkg, "Leaf"), listOf(field("id", FieldKind.Str, required = true)), null, null)
+        val node = TableDef(
+            FbsTypeName(pkg, "Node"),
+            listOf(field("next", FieldKind.Table(FbsTypeName(pkg, "Node"))), field("leaves", FieldKind.TableVector(leaf.type), id = 1)),
+            null, null,
+        )
+        val root = TableDef(FbsTypeName(pkg, "Root"), listOf(field("node", FieldKind.Table(node.type))), null, null)
+        val loop = TableDef(FbsTypeName(pkg, "Loop"), listOf(field("again", FieldKind.Table(FbsTypeName(pkg, "Loop")))), null, null)
+
+        val withRequired = TableBuilderGenerator.withRequiredFields(listOf(root, node, leaf, loop))
+
+        assertThat(withRequired).containsExactly(leaf.type, node.type, root.type)
+    }
+
+    @Test
+    fun `table specs get a Vector whose put takes build's parameters`() {
+        val code = generateFlat(
+            table(
+                field("name", FieldKind.Str, id = 0, required = true),
+                field("count", FieldKind.Scalar(ScalarType.INT), id = 1),
+            )
+        )
+
+        assertThat(code).contains("public class Vector( public override val size: Int, private val fill: Fill, ) : AbstractList<MsgSpec>()")
+        assertThat(code).contains("public fun put(name: String, count: Int = 0)")
+        assertThat(code).contains("_offset = Msg.pack(_builder, name = name, count = count)")
+        assertThat(code).contains("_last = MsgSpec(name = name, count = count)")
+        assertThat(code).contains("return IntArray(specs.size) { i -> specs.write(_writer, i) }")
+    }
+
+    @Test
+    fun `vectors of tables are written through the element's Vector`() {
+        val code = generateFlat(table(field("items", FieldKind.TableVector(FbsTypeName(pkg, "Item")))))
+
+        assertThat(code).contains("Msg.createItemsVector(builder, ItemSpec.Vector.offsets(builder, it))")
+    }
 }

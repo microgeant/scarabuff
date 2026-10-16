@@ -23,6 +23,7 @@ class ScarabuffPlugin : Plugin<Project> {
         extension.schemaDir.convention(project.layout.projectDirectory.dir("src/main/fbs"))
         extension.outputDir.convention(project.layout.buildDirectory.dir("generated/source/scarabuff"))
         extension.flatc.convention(project.providers.environmentVariable("FLATC"))
+        extension.flatbuffersVersion.convention(RUNTIME_DEPENDENCIES.first { it.startsWith("$FLATBUFFERS_JAVA:") }.substringAfterLast(':'))
 
         val generateTask = project.tasks.register("generateScarabuffSources", GenerateScarabuffSourcesTask::class.java) { task ->
             task.schemaDir.set(extension.schemaDir)
@@ -43,7 +44,15 @@ class ScarabuffPlugin : Plugin<Project> {
             project.configurations.named("api") { api ->
                 api.dependencies.addAllLater(
                     extension.addRuntimeDependencies.map { add ->
-                        if (add) RUNTIME_DEPENDENCIES.map { project.dependencies.create(it) } else emptyList()
+                        if (!add) return@map emptyList()
+                        RUNTIME_DEPENDENCIES.map { notation ->
+                            // flatbuffers-java follows flatbuffersVersion; the rest are fixed.
+                            if (notation.startsWith("$FLATBUFFERS_JAVA:")) {
+                                project.dependencies.create("$FLATBUFFERS_JAVA:${extension.flatbuffersVersion.get()}")
+                            } else {
+                                project.dependencies.create(notation)
+                            }
+                        }
                     }
                 )
             }
@@ -55,6 +64,8 @@ class ScarabuffPlugin : Plugin<Project> {
     }
 
     private companion object {
+        const val FLATBUFFERS_JAVA = "com.google.flatbuffers:flatbuffers-java"
+
         /** Written at build time from the version catalog; see scarabuff-gradle-plugin/build.gradle.kts. */
         val RUNTIME_DEPENDENCIES: List<String> =
             ScarabuffPlugin::class.java.getResource("runtime-dependencies.txt")!!

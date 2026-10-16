@@ -101,7 +101,7 @@ object BfbsReader {
         BaseType.Obj ->
             if (schema.objects(type.index()).isStruct) Kind.Supported(FieldKind.Struct(objectName(schema, type)))
             else Kind.Supported(FieldKind.Table(objectName(schema, type)))
-        BaseType.Union -> Kind.Unsupported("union")
+        BaseType.Union -> union(schema, type.index())
         BaseType.Array -> Kind.Unsupported("fixed-size array")
         BaseType.Vector64 -> Kind.Unsupported("64-bit vector")
         BaseType.Vector -> when (val element = type.element()) {
@@ -115,6 +115,28 @@ object BfbsReader {
         }
         else -> scalar(schema, type.baseType(), type.index())?.let { Kind.Supported(it) }
             ?: Kind.Unsupported("`${BaseType.name(type.baseType().toInt())}`")
+    }
+
+    /**
+     * A union whose members are all tables, each listed once. flatc can also put structs and
+     * strings in unions, and list a table twice under different names, but a member's spec is then
+     * no longer enough to tell which one is meant.
+     */
+    private fun union(schema: Schema, enumIndex: Int): Kind {
+        val enum = schema.enums(enumIndex)
+        val members = (0 until enum.valuesLength()).map { enum.values(it) }
+            .filter { it.value() != 0L } // NONE
+            .map { value ->
+                val type = value.unionType()
+                if (type == null || type.baseType() != BaseType.Obj || schema.objects(type.index()).isStruct) {
+                    return Kind.Unsupported("union (`${value.name()}` isn't a table)")
+                }
+                UnionMember(value.name(), value.value().toInt(), objectName(schema, type))
+            }
+        if (members.map { it.table }.toSet().size != members.size) {
+            return Kind.Unsupported("union (a table is listed twice)")
+        }
+        return Kind.Supported(FieldKind.Union(FbsTypeName.fromQualified(enum.name()), members))
     }
 
     private fun objectName(schema: Schema, type: Type) = FbsTypeName.fromQualified(schema.objects(type.index()).name())

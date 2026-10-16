@@ -8,17 +8,58 @@ and versions follow the policy in the README's [Versioning](README.md#versioning
 
 ### Added
 
-- **`<Struct>Spec.Vector`, struct vectors without an object per struct:**
-  `NumItemSpec.Vector(n) { i -> put(ids[i], scores[i], flags[i]) }`. It's a `List<NumItemSpec>`,
-  so it goes wherever one does, and table builders write its structs straight into the buffer.
-  Nested structs' fields are flattened into `put`'s parameters. Measured with JMH, encoding 1000
-  structs: 4.8 µs and 48 KB, against 8.5 µs and 84 KB for a list of specs, and 4.6 µs and 48 KB for
-  hand-written flatc code.
+- **`<Name>Spec.Vector`, vectors without an object per element,** for structs and tables:
+  `NumItemSpec.Vector(n) { i -> put(ids[i], scores[i], flags[i]) }`, or
+  `ItemSpec.Vector(n) { i -> put(id = ids[i], name = names[i]) }`. It's a `List` of specs, so it
+  goes wherever one does, and table builders write its elements straight into the buffer. A
+  struct's `put` takes nested structs' fields flattened; a table's takes the same arguments as
+  `build`. Measured with JMH, encoding 1000 elements:
+  - structs: 4.8 µs and 48 KB, against 8.5 µs and 84 KB for a list of specs, and 4.6 µs and
+    48 KB for hand-written flatc code;
+  - tables: 24% less allocation than a list of specs (143 KB against 187 KB), at the same speed
+    (52–54 µs).
+- **Servers reject requests missing a required field with `INVALID_ARGUMENT`,** naming the field
+  by its path through nested tables: `Order is missing required field items[1].sku`. The check
+  runs before the implementation sees the request, and for every call shape; streams fail at the
+  first bad request. Until now, the implementation threw `AssertionError` when it read the field,
+  and the client got `UNKNOWN`. Only request types with required fields, directly or in nested
+  tables, are checked.
+- **`missingRequiredField()` on every table:** the path of the first missing required field, or
+  null. Use it on responses, or on bytes from `fromBytes`. It reads presence without decoding
+  anything.
+
+- **FlatBuffers 24.3.25 support,** next to 25.2.10: `scarabuff { flatbuffersVersion.set("24.3.25") }`
+  switches both the `flatbuffers-java` the plugin adds and the `flatc` it installs. The new
+  `flatbuffersVersion` setting replaces pinning the runtime jar, which conflicted with the
+  version the plugin adds. 25.2.10 stays the default: FlatBuffers has released newer `flatc`
+  versions, but no `flatbuffers-java` to match them.
+
+- **Builders for unions of tables.** `union Payload { Inner, Other }` gets a `PayloadSpec`
+  interface that `InnerSpec` and `OtherSpec` implement, so a union field takes a member's spec
+  directly, and the builder writes the type tag. `toSpec()` reads the member back, and
+  `missingRequiredField()` checks it. Tables with union fields, and tables nesting them, now get
+  builders. Still unsupported: vectors of unions, unions with struct or string members, and
+  unions that list a table twice.
 
 ### Changed
 
-- **Table builders write struct vectors with an index loop** instead of `asReversed().forEach`,
-  through the generated `<Struct>Spec.Vector.writeElements`. The wire format is unchanged.
+- **Table builders write vectors of structs and tables through the element's generated `Vector`**
+  (`writeElements` and `offsets`), with an index loop for ordinary lists. The wire format is
+  unchanged.
+
+### Fixed
+
+- **Sending and receiving messages, in three cases** that `flatbuffers-java-grpc`'s marshaller, used
+  until now, got wrong. Each `<Service>GrpcKt` now has its own marshaller, which still sends
+  straight from the message's array, with no copy:
+  - a message in a direct buffer (built with a direct `ByteBufferFactory`) made the call **hang**;
+    it's now copied once and sent;
+  - a message in a slice of a larger array (`ByteBuffer.wrap(bytes, offset, length).slice()`) was
+    sent from the wrong offset, so the server failed to read it;
+  - a transport handing a message over in pieces got it **truncated without an error**; it's now
+    read in a loop until complete.
+- **Linux ARM and other platforms without an official `flatc`:** the error now gives the exact
+  commands to build the matching version from source.
 
 ## [0.5.1] - 2026-10-16
 

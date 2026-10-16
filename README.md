@@ -71,8 +71,8 @@ usually the simpler choice:
 [Performance](#performance) has the measurements behind both lists.
 
 scarabuff's current limits: JVM and Android only, with the schema in a Kotlin/JVM module (see
-[Android](#android)). Generated builders don't support unions yet (see
-[Building messages](#building-messages)).
+[Android](#android)). Generated builders support unions of tables, but not vectors of unions
+(see [Building messages](#building-messages)).
 
 ## Quick start
 
@@ -189,12 +189,18 @@ val again: Post = Post.fromBytes(bytes)
   every `Vec2Spec` property is required.
 - **Lists:** vectors take a `List` (`List<Int>`, `List<String>`, `List<UserSpec>`,
   `List<Vec2Spec>`, ...).
-- **Struct vectors without an object per struct:** `Vec2Spec.Vector(n) { i -> put(xs[i], ys[i]) }`
-  is a `List<Vec2Spec>` whose elements are produced while the message is written, so a 1000-struct
-  vector costs what hand-written flatc code does. `put` takes the struct's scalars, with nested
-  structs flattened (`put(positionX, positionY, angle)`). The callback must call `put` exactly once
-  per index, with the same values each time: it runs from the last index to the first, and again
-  whenever the list is read. It still reads, compares and prints like any list of specs.
+- **Vectors without an object per element:** every spec has a `Vector`, a `List` whose elements
+  are produced while the message is written, so a 1000-element vector doesn't allocate 1000
+  specs. Fill it with `put`, once per index:
+  - For a struct, `put` takes its scalars, with nested structs flattened:
+    `Vec2Spec.Vector(n) { i -> put(xs[i], ys[i]) }`, or `put(positionX, positionY, angle)` for a
+    struct nesting a `Vec2`. That costs what hand-written flatc code does.
+  - For a table, `put` takes the same named arguments as `build`, defaults included:
+    `UserSpec.Vector(n) { i -> put(id = ids[i], name = names[i]) }`.
+
+  `put` must be called with the same values each time for an index: the callback runs again
+  whenever the list is read, and structs are written from the last index to the first. A `Vector`
+  still reads, compares and prints like any list of specs.
 
   ```kotlin
   val route = Vec2Spec.Vector(xs.size) { i -> put(xs[i], ys[i]) }
@@ -210,10 +216,18 @@ val again: Post = Post.fromBytes(bytes)
   the offset, and `post.copyInto(builder)` re-serializes an existing message into it. A struct's
   `copyInto` and `writeTo` write it inline; inside a table, call them right before that field's
   `add` call.
-- **Not supported yet:** tables with union fields or vectors of unions, and tables that nest one of
-  those. They still get `fromBytes`, but no `build`, and the build says which field is the reason.
-  Build those by hand with flatc's `start`/`add`/`end` functions. (Fixed-size arrays in structs
-  never get this far: flatc doesn't support them for Kotlin.)
+- **Unions:** for `union Payload { Inner, Other }`, scarabuff generates a `PayloadSpec` interface,
+  and `InnerSpec` and `OtherSpec` implement it. A `payload:Payload` field takes either spec,
+  `WithUnion.build(payload = InnerSpec(v = 1))`, and the builder writes the type tag for you.
+  `toSpec()` reads back the member the tag names, or null for a tag it doesn't know, such as one
+  from a newer schema. Received messages still use flatc's accessors: check `payloadType`, then
+  read `payload(Inner())`. Don't mark a union field `(required)`: flatc's own Kotlin for it
+  doesn't compile.
+- **Not supported yet:** vectors of unions; unions whose members aren't all tables, or that list
+  a table twice under different names; and tables that nest one of those. They still get
+  `fromBytes`, but no `build`, and the build says which field is the reason. Build those by hand
+  with flatc's `start`/`add`/`end` functions. (Fixed-size arrays in structs never get this far:
+  flatc doesn't support them for Kotlin.)
 - **Optional scalars** (`count:int = null`) are written correctly even when set to `0`. flatc's
   own `addCount` would silently drop that value.
 - **Names:** a schema that already declares a type called `<Name>Spec` next to `<Name>` fails with a
@@ -247,6 +261,21 @@ table GreetRequest { name:string (required); nickname:string; }
 peer left it out throws too. Both are `AssertionError`s, which `catch (e: Exception)` doesn't
 catch.
 
+A peer can still send a message without it: an older client, one in another language, or a
+hand-written one. So:
+
+- **Servers check requests for you.** Before your implementation sees a request, the generated
+  server checks its required fields, including those of nested tables. A request missing one
+  fails the call with `INVALID_ARGUMENT`, such as `Order is missing required field items[1].sku`.
+  Before 0.6.0, clients got `UNKNOWN` from the `AssertionError` instead. Streams fail at the first
+  bad request. Request types without required fields aren't checked, so they cost nothing.
+- **Check other messages yourself** with `message.missingRequiredField()`. Every table has it. It
+  returns that path, or null if every required field is present. Use it for responses a client
+  receives, or bytes from `fromBytes`.
+
+The check reads presence from the message's vtable and decodes nothing. For a union, it checks the
+member the type tag names. It comes with the builders, so with `generateBuilders.set(false)` requests aren't checked.
+
 **Messages are views over bytes.** A table object reads its fields from a `ByteBuffer` on every
 access; it doesn't copy them out. With scarabuff's marshallers:
 
@@ -265,8 +294,8 @@ access; it doesn't copy them out. With scarabuff's marshallers:
   it. This relies on grpc-java's behavior rather than a documented guarantee;
   `StreamingBuilderReuseTest` in `example/` checks it on every build. To reuse a builder anywhere
   else, use `buildBytes(builder = ...)`, which copies the bytes out, and send `fromBytes(bytes)`.
-- **Use heap buffers.** The marshaller needs `ByteBuffer.array()`, which a direct `ByteBuffer`
-  doesn't have, so don't give `FlatBufferBuilder` a direct-buffer factory.
+- **Heap buffers are fastest.** A message in a direct (or read-only) buffer works, but the
+  marshaller has to copy it once to send it, since there's no backing array to write from.
 - **Map at the edges.** Accessors decode on every call (each `.name` read builds a new `String`),
   and a table keeps its whole message buffer alive. In app code, convert messages into data classes
   at the network boundary rather than passing tables around: `message.toSpec()` gives you the
@@ -352,7 +381,7 @@ objects; `<Struct>Spec.Vector` removes them. Measured with JMH, encoding 1000 st
 ### Getting the most out of it
 
 - **Put numeric data in structs.** That's where FlatBuffers wins most clearly, on both encode and
-  decode. Build large struct vectors with `<Struct>Spec.Vector` when the data is already in arrays.
+  decode. Build large vectors with `<Name>Spec.Vector` when the data is already in arrays.
 - **Use narrower types,** such as `float` instead of `double` and `ushort` instead of `int`, where
   the range allows. That shrinks messages, which are larger than Protocol Buffers'.
 - **Let the builders size themselves.** Since 0.5.1 they start at an estimate of each message's
@@ -460,14 +489,36 @@ fails at compile time).
 So by default the plugin manages `flatc` itself:
 
 1. It reads the `com.google.flatbuffers:flatbuffers-java` version from your compile classpath
-   (or `flatcVersion`, if you set it).
+   (or `flatcVersion`, if you set it). That's `flatbuffersVersion` unless something else in your
+   build brings in a newer one.
 2. It downloads that version's official binary from the
    [FlatBuffers GitHub releases](https://github.com/google/flatbuffers/releases), checks it
    against a SHA-256 pinned in the plugin, and caches it in
    `~/.gradle/caches/scarabuff/flatc/`. Later builds reuse it.
 
-Supported versions: **25.2.10**, on macOS (Intel and Apple Silicon), Linux x86_64 and Windows
-x86_64. There's no official Linux ARM binary.
+Supported versions, each tested end to end on every build:
+
+| FlatBuffers | |
+|---|---|
+| **25.2.10** | The default. The newest `flatbuffers-java` on Maven Central: FlatBuffers has released newer `flatc` versions (25.9.23, 25.12.19), but no Java runtime to match them. |
+| **24.3.25** | For projects that pin an older `flatbuffers-java`. |
+
+Each is supported on macOS (Intel and Apple Silicon), Linux x86_64 and Windows x86_64. There's no
+official Linux ARM binary, so on Linux ARM (ARM CI runners, AWS Graviton) the build stops and prints
+the commands to build the matching `flatc` from source: a `git clone` of that release, then CMake.
+It takes a minute or two, needs CMake and a C++ compiler, and only has to be done once per machine
+or CI image. Distribution packages such as apt's `flatbuffers-compiler` are usually another version,
+which won't match the runtime.
+
+To switch, set one property. It changes the `flatbuffers-java` the plugin adds, and with it the
+`flatc` it installs:
+
+```kotlin
+scarabuff { flatbuffersVersion.set("24.3.25") }
+```
+
+Pinning `flatbuffers-java` with `strictly` doesn't work instead: it conflicts with the version
+the plugin adds.
 
 To use your own `flatc` instead (another version, Linux ARM, offline builds), set
 `scarabuff { flatc.set("/path/to/flatc") }` or the `FLATC` environment variable; `flatc` wins
@@ -486,7 +537,7 @@ All settings are optional:
 scarabuff {
     schemaDir.set(layout.projectDirectory.dir("src/main/fbs"))
     outputDir.set(layout.buildDirectory.dir("generated/source/scarabuff"))
-    flatcVersion.set("25.2.10")
+    flatbuffersVersion.set("25.2.10")
     kotlinPackageSuffix.set(".grpc")
 }
 ```
@@ -495,7 +546,8 @@ scarabuff {
 |---|---|---|
 | `schemaDir` | `src/main/fbs` | Directory containing the `.fbs` schemas. |
 | `outputDir` | `build/generated/source/scarabuff` | Where generated Kotlin goes; added to the `main` source set automatically. |
-| `flatcVersion` | your `flatbuffers-java` version | Which `flatc` to download and cache. |
+| `flatbuffersVersion` | `25.2.10` | The FlatBuffers version: the `flatbuffers-java` the plugin adds, and so the `flatc` it installs. See [How scarabuff gets `flatc`](#how-scarabuff-gets-flatc). |
+| `flatcVersion` | your `flatbuffers-java` version | Which `flatc` to download and cache, if it must differ from the runtime's. Rarely needed. |
 | `flatc` | `$FLATC` | Use this `flatc` executable (path, or name on `$PATH`) instead of downloading one. |
 | `addRuntimeDependencies` | `true` | Add the libraries the generated code needs to `api`. Set to `false` to declare them all yourself. |
 | `generateBuilders` | `true` | Generate `<Table>Builders.kt` for each table; see [Building messages](#building-messages). |
@@ -563,11 +615,11 @@ wrapper would then just delegate to that class's static accessors.
 Since that class doesn't exist for Kotlin, `GrpcCoroutineGenerator` builds the same
 `ServiceDescriptor`/`MethodDescriptor`/marshaller logic itself via KotlinPoet, targeting the
 `--kotlin`-generated table classes directly. This works because those classes extend the exact
-same `com.google.flatbuffers.Table` base class the Java ones do, and
-`com.google.flatbuffers.grpc.FlatbuffersUtils.marshaller(...)` (from the `flatbuffers-java-grpc`
-runtime jar, still a regular dependency — not generated code) is generic over any `Table`
-subclass. So `Orchestrator` runs `flatc --kotlin` (no `--java`, no `--grpc`) and the entire
-generated output — table classes and gRPC wrapper alike — is Kotlin.
+same `com.google.flatbuffers.Table` base class the Java ones do. The marshaller is generated too,
+privately in each `<Service>GrpcKt`: `flatbuffers-java-grpc`'s `FlatbuffersUtils.marshaller`, which
+scarabuff used before 0.6.0, ignores a buffer's array offset, fails on direct buffers, and assumes
+one `read` returns a whole message. So `Orchestrator` runs `flatc --kotlin` (no `--java`, no
+`--grpc`) and the entire generated output — table classes and gRPC wrapper alike — is Kotlin.
 
 ## Development
 
@@ -589,10 +641,21 @@ Or run a single command without entering the shell: `nix develop -c ./gradlew bu
 - **`flatc`** is pinned by [`flake.nix`](flake.nix) to the FlatBuffers `v25.2.10` release
   binaries, for `x86_64-linux`, `x86_64-darwin` and `aarch64-darwin` (there's no official
   `aarch64-linux` binary for that release). `flake.lock` pins the `nixpkgs` revision.
-- To bump FlatBuffers: change `flatcVersion` in `flake.nix` (and its per-system asset hashes, see
-  the comment there) together with `flatbuffersJava`/`flatbuffersJavaGrpc` in
-  `gradle/libs.versions.toml`, in the same commit. To let users' builds download the new
-  version, also add its assets and hashes to `FlatcInstaller.RELEASES`.
+
+### Supporting another FlatBuffers version
+
+A version is only worth adding once its `flatbuffers-java` is on Maven Central; FlatBuffers
+sometimes releases `flatc` without it.
+
+1. **Hash its binaries:** download `Mac.flatc.binary.zip`, `Linux.flatc.binary.g++-13.zip` and
+   `Windows.flatc.binary.zip` from the GitHub release, run `shasum -a 256` on each, and add an
+   entry to `FlatcInstaller.RELEASES`.
+2. **Test it:** add a case like `an older FlatBuffers version works when flatbuffersVersion
+   selects it` to `ScarabuffPluginFunctionalTest`, and list it in the README's supported versions.
+3. **To make it the default,** also change `flatbuffersJava` in `gradle/libs.versions.toml` and
+   `flatcVersion` in `flake.nix`, with its per-system hashes (see the comment there), in the
+   same commit. Check `flatbuffersJavaGrpc` for a matching release too. Keep the old default
+   supported for at least one minor release, and note the change in the CHANGELOG.
 
 ## License
 

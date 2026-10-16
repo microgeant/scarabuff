@@ -18,6 +18,14 @@ abstract class ScarabuffExtension @Inject constructor(
     val outputDir: DirectoryProperty = objects.directoryProperty()
 
     /**
+     * The FlatBuffers version: the `flatbuffers-java` that [addRuntimeDependencies] adds, and so
+     * the flatc scarabuff installs to match it. Defaults to the newest version scarabuff supports.
+     * Set it to use another supported one (see the README's list); a newer `flatbuffers-java`
+     * declared elsewhere still wins, as Gradle resolves to the highest version.
+     */
+    val flatbuffersVersion: Property<String> = objects.property(String::class.java)
+
+    /**
      * FlatBuffers version of the flatc that scarabuff downloads, verifies and caches. Defaults to
      * the version of `com.google.flatbuffers:flatbuffers-java` on the compile classpath, so the
      * compiler always matches the runtime. Ignored when [flatc] or `$FLATC` is set.
@@ -33,7 +41,7 @@ abstract class ScarabuffExtension @Inject constructor(
     /**
      * Adds the libraries the generated code compiles against (flatbuffers-java,
      * flatbuffers-java-grpc, grpc-stub, grpc-kotlin-stub, kotlinx-coroutines-core) to `api`, at
-     * the versions scarabuff is tested with. Defaults to `true`. Your own declarations still win
+     * the versions scarabuff is tested with (flatbuffers-java at [flatbuffersVersion]). Defaults to `true`. Your own declarations still win
      * if they're newer; set to `false` to manage all of them yourself. A gRPC transport
      * (`grpc-netty-shaded`, `grpc-okhttp`, ...) is never added: that choice depends on the platform.
      */

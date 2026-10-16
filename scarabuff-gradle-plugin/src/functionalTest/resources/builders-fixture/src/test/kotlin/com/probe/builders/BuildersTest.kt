@@ -208,6 +208,24 @@ class BuildersTest {
     }
 
     @Test
+    fun `a table Vector writes the same bytes as a list of specs, defaults and nesting included`() {
+        val labels = List(50) { "item-$it" }
+        val list = List(50) { InnerSpec(v = it, label = labels[it]) }
+        val vector = InnerSpec.Vector(50) { i -> put(v = i, label = labels[i]) }
+
+        assertThat(All.buildBytes(vInner = vector)).isEqualTo(All.buildBytes(vInner = list))
+        assertThat(vector).isEqualTo(list)
+        assertThat(All.build(vInner = vector).toSpec().vInner).isEqualTo(list)
+        // Defaults apply as in build: label is left out, so it's null.
+        assertThat(InnerSpec.Vector(1) { put(v = 7) }.single()).isEqualTo(InnerSpec(v = 7))
+
+        val strict = StrictSpec(name = "s", inner = InnerSpec(v = 1), ids = listOf(1))
+        val stricts = List(3) { strict.copy(name = "s$it") }
+        val strictVector = StrictSpec.Vector(3) { i -> put(name = "s$i", inner = InnerSpec(v = 1), ids = listOf(1)) }
+        assertThat(strictVector).isEqualTo(stricts)
+    }
+
+    @Test
     fun `a struct Vector's fill must put exactly once per index`() {
         val twice = NumItemSpec.Vector(2) { i -> put(i.toLong(), 0.0, true); put(i.toLong(), 0.0, true) }
         val never = NumItemSpec.Vector(2) { }
@@ -238,6 +256,61 @@ class BuildersTest {
 
         // A spec per struct would be over 30 KB for 1000 of them; what's left is a few small objects.
         assertWithMessage("bytes allocated per 1000-struct message").that(perMessage).isLessThan(1024L)
+    }
+
+    @Test
+    fun `missingRequiredField checks required strings, tables, vectors and structs`() {
+        assertThat(Strict.build(name = "n", inner = InnerSpec(), ids = listOf()).missingRequiredField()).isNull()
+        assertThat(All.build().missingRequiredField()).isNull()
+
+        // flatc's end functions refuse to finish these, so they're written field by field.
+        fun table(slots: Int, write: FlatBufferBuilder.() -> Unit = {}): ByteBuffer {
+            val builder = FlatBufferBuilder()
+            val name = builder.createString("n")
+            builder.startTable(slots)
+            builder.write()
+            if (slots == 3) builder.addOffset(0, name, 0)
+            builder.finish(builder.endTable())
+            return builder.dataBuffer()
+        }
+        assertThat(Strict.getRootAsStrict(table(3)).missingRequiredField()).isEqualTo("inner")
+        assertThat(Strict.getRootAsStrict(table(2)).missingRequiredField()).isEqualTo("name")
+        assertThat(Shapes.getRootAsShapes(table(6)).missingRequiredField()).isEqualTo("pose")
+    }
+
+    @Test
+    fun `union fields take a member's spec and read back as one`() {
+        val strict = StrictSpec(name = "s", inner = InnerSpec(v = 1), ids = listOf(2))
+        val message = WithUnion.build(payload = InnerSpec(v = 7, label = "in"), other = strict)
+
+        assertThat(message.payloadType).isEqualTo(Payload.Inner)
+        assertThat((message.payload(Inner()) as Inner).v).isEqualTo(7)
+        assertThat(message.otherType).isEqualTo(Payload.Strict)
+        assertThat(message.toSpec()).isEqualTo(WithUnionSpec(payload = InnerSpec(v = 7, label = "in"), other = strict))
+
+        val crossNamespace = WithUnionSpec(payload = SharedSpec(note = "ns"))
+        assertThat(crossNamespace.build().toSpec()).isEqualTo(crossNamespace)
+        assertThat(WithUnion.build().payloadType).isEqualTo(Payload.NONE)
+        assertThat(WithUnion.build().toSpec()).isEqualTo(WithUnionSpec())
+
+        val builder = FlatBufferBuilder()
+        builder.finish(HoldsUnion.build(held = crossNamespace).held!!.copyInto(builder))
+        assertThat(WithUnion.getRootAsWithUnion(builder.dataBuffer()).toSpec()).isEqualTo(crossNamespace)
+    }
+
+    @Test
+    fun `missingRequiredField follows the union member the type names`() {
+        // A Strict without its name, as the union's `other` member.
+        val builder = FlatBufferBuilder()
+        builder.startTable(3)
+        val strict = builder.endTable()
+        WithUnion.startWithUnion(builder)
+        WithUnion.addOtherType(builder, Payload.Strict)
+        WithUnion.addOther(builder, strict)
+        builder.finish(WithUnion.endWithUnion(builder))
+
+        assertThat(WithUnion.getRootAsWithUnion(builder.dataBuffer()).missingRequiredField()).isEqualTo("other.name")
+        assertThat(WithUnion.build(other = InnerSpec()).missingRequiredField()).isNull()
     }
 
     @Test

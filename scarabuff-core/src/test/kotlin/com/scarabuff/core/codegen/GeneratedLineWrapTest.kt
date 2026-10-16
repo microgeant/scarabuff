@@ -11,6 +11,7 @@ import com.scarabuff.core.fbs.StreamingKind
 import com.scarabuff.core.fbs.StructDef
 import com.scarabuff.core.fbs.StructFieldDef
 import com.scarabuff.core.fbs.TableDef
+import com.scarabuff.core.fbs.UnionMember
 import org.junit.jupiter.api.Test
 
 /**
@@ -29,7 +30,7 @@ class GeneratedLineWrapTest {
      * is not, because the lambda is then read as a separate expression. So a `{` may only start a
      * line if the line before doesn't end in one of the lambda-taking calls the generators emit.
      */
-    private val lambdaCall = Regex("""(\blet|\bforEach|\blazy|\bwith\([^()]*\)|\bIntArray\([^()]*\)|\bList\([^()]*\))$""")
+    private val lambdaCall = Regex("""(\blet|\bmap|\bforEach|\blazy|\bwith\([^()]*\)|\bIntArray\([^()]*\)|\bList\([^()]*\))$""")
 
     private fun assertWrapsSafely(code: String, context: String) {
         val lines = code.lines()
@@ -41,6 +42,10 @@ class GeneratedLineWrapTest {
                 .isFalse()
             assertWithMessage("$context, line ${i + 1} separates a lambda parameter from its arrow:\n$previous\n$line")
                 .that(trimmed.startsWith("->"))
+                .isFalse()
+            // A `return` ending a line returns nothing: the value on the next line is dropped.
+            assertWithMessage("$context, line ${i + 1} breaks after `return`:\n$line")
+                .that(line.trimEnd().endsWith(" return") || line.trim() == "return")
                 .isFalse()
         }
     }
@@ -59,6 +64,7 @@ class GeneratedLineWrapTest {
             FieldKind.Table(nested),
             FieldKind.Str,
             FieldKind.Scalar(ScalarType.ULONG),
+            FieldKind.Union(FbsTypeName(pkg, "Choice"), listOf(UnionMember("Nested", 1, nested))),
         )
         for (length in lengths) {
             for (kind in kinds) {
@@ -73,7 +79,7 @@ class GeneratedLineWrapTest {
                     )
                     val table = TableDef(FbsTypeName(pkg, "Num" + "Payload".repeat(1 + length / 40)), listOf(field), null, null)
                     assertWrapsSafely(
-                        TableBuilderGenerator.generate(table).toString(),
+                        TableBuilderGenerator.generate(table, withRequired = setOf(table.type, nested)).toString(),
                         "field of length $length, $kind, required=$required",
                     )
                 }
@@ -112,6 +118,10 @@ class GeneratedLineWrapTest {
                 methods = StreamingKind.entries.mapIndexed { i, kind -> RpcMethod("M$i" + "m".repeat(length), type, type, kind) },
             )
             assertWrapsSafely(GrpcCoroutineGenerator.generate(service).toString(), "names of length $length")
+            assertWrapsSafely(
+                GrpcCoroutineGenerator.generate(service, withRequired = setOf(type)).toString(),
+                "names of length $length, checking required fields",
+            )
         }
     }
 }

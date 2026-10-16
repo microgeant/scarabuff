@@ -4,6 +4,7 @@ import com.scarabuff.core.codegen.FieldAccessGenerator
 import com.scarabuff.core.codegen.GrpcCoroutineGenerator
 import com.scarabuff.core.codegen.StructBuilderGenerator
 import com.scarabuff.core.codegen.TableBuilderGenerator
+import com.scarabuff.core.codegen.UnionGenerator
 import com.scarabuff.core.fbs.BfbsReader
 import com.scarabuff.core.fbs.FbsTypeName
 import com.scarabuff.core.fbs.FieldKind
@@ -72,11 +73,14 @@ object Orchestrator {
                 .resolve("${fileSpec.name}.kt")
         }
 
+        // missingRequiredField() comes with the builders, so servers only check requests with them.
+        val withRequired = if (generateBuilders) TableBuilderGenerator.withRequiredFields(schema.tables) else emptySet()
         for (service in schema.services) {
             write(
                 GrpcCoroutineGenerator.generate(
                     service = service,
                     kotlinPackage = kotlinPackage(service.namespace, kotlinPackageSuffix),
+                    withRequired = withRequired,
                 )
             )
         }
@@ -89,12 +93,21 @@ object Orchestrator {
             }
             val fieldAccess = FieldAccessGenerator.className(schema.tables.map { it.type.packageName }.distinct())
             val tables = withUnsupportedNesting(schema.tables, structs.keys)
-            // Only the string helpers need it.
-            if (tables.any { table -> table.fields.any { it.kind == FieldKind.Str } }) {
+            // Only the string helpers and the required-field check need it.
+            if (tables.any { table -> table.fields.any { it.kind == FieldKind.Str || it.required } }) {
                 write(FieldAccessGenerator.generate(fieldAccess))
             }
+            // Unions of tables that all have builders, each once, however many fields use it.
+            val unions = tables.filter { it.unsupportedReason == null }
+                .flatMap { table -> table.fields.mapNotNull { it.kind as? FieldKind.Union } }
+                .distinctBy { it.type }
+            val tablesByType = tables.associateBy { it.type }
+            for (union in unions) {
+                write(UnionGenerator.generate(union) { type -> tablesByType[type]?.let(TableBuilderGenerator::vtableSize) ?: 32 })
+            }
             for (table in tables) {
-                write(TableBuilderGenerator.generate(table, fieldAccess, tables.associateBy { it.type }, structs))
+                val memberOf = unions.filter { union -> union.members.any { it.table == table.type } }.map(UnionGenerator::specClassName)
+                write(TableBuilderGenerator.generate(table, fieldAccess, tablesByType, structs, withRequired, memberOf))
                 table.unsupportedReason?.let { tablesWithoutBuilders["${table.type.packageName}.${table.type.simpleName}"] = it }
             }
         }
@@ -120,6 +133,7 @@ object Orchestrator {
                         is FieldKind.TableVector -> kind.element.takeIf { it !in supported }
                         is FieldKind.Struct -> kind.type.takeIf { it !in structs }
                         is FieldKind.StructVector -> kind.element.takeIf { it !in structs }
+                        is FieldKind.Union -> kind.members.map { it.table }.firstOrNull { it !in supported }
                         else -> null
                     }
                     nested?.let { "field `${field.name}` holding `${it.packageName}.${it.simpleName}`, which has no builders" }
@@ -132,7 +146,8 @@ object Orchestrator {
 
     /** Builders add a `<Name>Spec` class per table and struct; fail clearly if the schema already has one. */
     private fun checkSpecNames(schema: Schema) {
-        val declared = (schema.tables.map { it.type } + schema.structs.map { it.type }).toSet()
+        val unions = schema.tables.flatMap { table -> table.fields.mapNotNull { (it.kind as? FieldKind.Union)?.type } }
+        val declared = (schema.tables.map { it.type } + schema.structs.map { it.type } + unions).toSet()
         for (type in declared) {
             val spec = FbsTypeName(type.packageName, "${type.simpleName}Spec")
             require(spec !in declared) {

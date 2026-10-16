@@ -102,4 +102,14 @@ class FlatcInstallerTest {
             }
         }
     }
+
+    @Test
+    fun `platforms without an official binary get the exact build steps`() {
+        val message = FlatcInstaller.noBinaryMessage("25.2.10", "Linux", "aarch64")
+
+        assertThat(message).contains("(Linux aarch64)")
+        assertThat(message).contains("git clone --depth 1 --branch v25.2.10 https://github.com/google/flatbuffers.git")
+        assertThat(message).contains("cmake --build flatbuffers/build --target flatc --parallel")
+        assertThat(message).contains("export FLATC=")
+    }
 }
