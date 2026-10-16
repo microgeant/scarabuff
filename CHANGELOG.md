@@ -50,6 +50,12 @@ and versions follow the policy in the README's [Versioning](README.md#versioning
   builders. Still unsupported: vectors of unions, unions with struct or string members, and
   unions that list a table twice.
 
+- **Android modules:** the plugin can be applied directly to an Android library or app module,
+  alongside the Android Gradle plugin, with AGP 9's built-in Kotlin or the Kotlin Android plugin.
+  Each variant gets a `generate<Variant>ScarabuffSources` task, registered through AGP's variant
+  API, so the IDE sees the generated sources. The runtime libraries go to `api` in a library and
+  `implementation` in an app. Tested with AGP 8.13 (library) and 9.0 (app). A separate Kotlin/JVM
+  schema module still works, and remains the way to share a schema with a server.
 - **Benchmarks in the repository:** `benchmark/` runs FlatBuffers against Protocol Buffers with JMH,
   built against the checkout next to it (`cd benchmark && ./gradlew jmh`). It covers encoding,
   decoding, the marshaller, unary RPCs, streaming, and gzip compression. The README's performance

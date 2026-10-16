@@ -241,7 +241,11 @@ class BuildersTest {
 
     @Test
     fun `writing a struct Vector allocates nothing per struct`() {
-        val threads = java.lang.management.ManagementFactory.getThreadMXBean() as com.sun.management.ThreadMXBean
+        // Through reflection: Android unit tests compile against android.jar, which lacks these, though
+        // they run on a JVM that has them.
+        val threads = Class.forName("java.lang.management.ManagementFactory").getMethod("getThreadMXBean").invoke(null)
+        val allocated = Class.forName("com.sun.management.ThreadMXBean").getMethod("getCurrentThreadAllocatedBytes")
+        fun allocatedBytes(): Long = allocated.invoke(threads) as Long
         val scores = DoubleArray(1000) { it * 0.5 }
         val builder = FlatBufferBuilder(32 * 1024)
         fun encode(): Int = NumPayload.build(
@@ -250,9 +254,9 @@ class BuildersTest {
         repeat(2_000) { encode() }
 
         val runs = 200
-        val before = threads.currentThreadAllocatedBytes
+        val before = allocatedBytes()
         repeat(runs) { encode() }
-        val perMessage = (threads.currentThreadAllocatedBytes - before) / runs
+        val perMessage = (allocatedBytes() - before) / runs
 
         // A spec per struct would be over 30 KB for 1000 of them; what's left is a few small objects.
         assertWithMessage("bytes allocated per 1000-struct message").that(perMessage).isLessThan(1024L)

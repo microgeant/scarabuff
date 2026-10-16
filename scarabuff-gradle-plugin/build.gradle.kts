@@ -14,6 +14,9 @@ dependencies {
     shadow(libs.kotlinpoet)
     shadow(libs.flatbuffers.java)
     compileOnly("org.jetbrains.kotlin:kotlin-gradle-plugin:${libs.versions.kotlin.get()}")
+    // The Android Gradle plugin's public variant API (see AndroidSupport). compileOnly: the
+    // consuming build brings its own AGP. 8.1 is old enough to be readable by this build's Kotlin.
+    compileOnly("com.android.tools.build:gradle-api:8.1.0")
 
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.truth)
@@ -61,7 +64,7 @@ gradlePlugin {
             displayName = "scarabuff"
             description = "Generates FlatBuffers + gRPC Kotlin coroutine boilerplate from .fbs " +
                 "rpc_service definitions. Requires a flatc binary matching your flatbuffers-java version."
-            tags.set(listOf("flatbuffers", "grpc", "kotlin", "coroutines", "codegen"))
+            tags.set(listOf("flatbuffers", "grpc", "kotlin", "coroutines", "codegen", "android"))
         }
     }
 }

@@ -28,7 +28,7 @@ abstract class ScarabuffExtension @Inject constructor(
     /**
      * FlatBuffers version of the flatc that scarabuff downloads, verifies and caches. Defaults to
      * the version of `com.google.flatbuffers:flatbuffers-java` on the compile classpath, so the
-     * compiler always matches the runtime. Ignored when [flatc] or `$FLATC` is set.
+     * compiler always matches the runtime; in an Android module, to [flatbuffersVersion]. Ignored when [flatc] or `$FLATC` is set.
      */
     val flatcVersion: Property<String> = objects.property(String::class.java)
 

@@ -71,8 +71,8 @@ usually the simpler choice:
 
 [Performance](#performance) has the measurements behind both lists.
 
-scarabuff's current limits: JVM and Android only, with the schema in a Kotlin/JVM module (see
-[Android](#android)). Generated builders support unions of tables, but not vectors of unions
+scarabuff's current limits: JVM and Android only (Kotlin/JVM, Android library and app modules;
+see [Android](#android)), as the generated code uses Java libraries. Generated builders support unions of tables, but not vectors of unions
 (see [Building messages](#building-messages)).
 
 ## Quick start
@@ -83,7 +83,7 @@ scarabuff's current limits: JVM and Android only, with the schema in a Kotlin/JV
 ```kotlin
 // build.gradle.kts
 plugins {
-    kotlin("jvm") version "2.2.10"
+    kotlin("jvm") version "2.2.10" // or com.android.library / com.android.application
     id("io.github.microgeant.scarabuff") version "0.5.1"
 }
 ```
@@ -419,33 +419,41 @@ The same run, comparing scarabuff's generated builders with hand-written flatc c
 
 ## Android
 
-The plugin currently needs the `org.jetbrains.kotlin.jvm` plugin, so it can't be applied to an
-Android module directly. Put the schemas in a small Kotlin/JVM module and depend on it from the
-app:
+Apply the plugin to an Android library or app module, next to the Android Gradle plugin, with
+the schemas in `src/main/fbs`:
 
 ```kotlin
-// api/build.gradle.kts
+// app/build.gradle.kts
 plugins {
-    kotlin("jvm")
-    id("io.github.microgeant.scarabuff") version "0.5.1"
+    id("com.android.application")
+    id("io.github.microgeant.scarabuff") version "0.6.0"
 }
 
-// app/build.gradle.kts
 dependencies {
-    implementation(project(":api"))
     implementation("io.grpc:grpc-okhttp:1.70.0")
 }
 ```
 
-- **Transport:** use `grpc-okhttp` on Android, not `grpc-netty`.
-- **JVM target:** keep the schema module's bytecode target at or below the app's. If the app
-  compiles for Java 11, set the same in the schema module:
+- **Variants:** each variant gets its own `generate<Variant>ScarabuffSources` task, registered
+  through AGP's variant API as generated sources. So Android Studio sees them, and AGP 9's
+  built-in Kotlin or the Kotlin Android plugin compiles them. `generateScarabuffSources` runs
+  them all.
+- **Libraries:** in a library module the runtime libraries are added to `api`, so modules depending
+  on it can use the generated types. In an app they go to `implementation`.
+- **FlatBuffers version:** an Android module has a compile classpath per variant, so `flatc`
+  follows `flatbuffersVersion` instead of whatever `flatbuffers-java` a variant resolves. To
+  change both, set `scarabuff { flatbuffersVersion.set(...) }`.
+- **Sharing the schema with a server:** if a Kotlin/JVM server uses the same schema, put the
+  schemas in a small Kotlin/JVM module instead, and depend on it from both. Then both compile
+  against one copy of the generated code. Keep that module's bytecode target at or below the
+  app's: if the app compiles for Java 11, set the same there:
 
   ```kotlin
   java { targetCompatibility = JavaVersion.VERSION_11 }
   kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11) } }
   ```
 
+- **Transport:** use `grpc-okhttp` on Android, not `grpc-netty`.
 - **Reaching a server on your machine:**
   - From the emulator, `10.0.2.2` is your machine's `localhost`.
   - Or run `adb reverse tcp:50051 tcp:50051` and connect to `127.0.0.1:50051`. This also works
@@ -468,6 +476,13 @@ Each release is tested by building and running `example/` against the published 
 | 8.14.6 | 2.1.21 |
 | 9.1.0 | 2.2.10 |
 | 9.8.1 | 2.4.21 |
+
+And in Android modules, building release and running the same tests as local unit tests:
+
+| Android Gradle plugin | Module | Gradle | Kotlin |
+|---|---|---|---|
+| 8.13.0 | library | 8.14.6 | Kotlin Android plugin 2.1.21 |
+| 9.0.1 | app | 9.1.0 | AGP's built-in Kotlin |
 
 Versions in between are very likely fine; these are the ones that are actually checked, by
 `./gradlew :scarabuff-gradle-plugin:functionalTest`. Gradle must run on JDK 17 or newer, and the

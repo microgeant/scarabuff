@@ -3,6 +3,7 @@ package com.scarabuff.gradle
 import com.google.common.truth.Truth.assertThat
 import org.gradle.testkit.runner.GradleRunner
 import org.gradle.testkit.runner.TaskOutcome
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import org.junit.jupiter.params.ParameterizedTest
@@ -66,9 +67,91 @@ class ScarabuffPluginFunctionalTest {
         )
     }
 
+    /**
+     * The same sources as [fixture], in an Android module: an app, or a library. AGP 9 compiles
+     * Kotlin itself; before that, [kotlinVersion] applies the Kotlin Android plugin. The tests run
+     * as local unit tests, on the JVM, against the debug variant.
+     */
+    private fun androidFixture(agpVersion: String, app: Boolean, kotlinVersion: String? = null) {
+        example.resolve("src").copyRecursively(projectDir.resolve("src"))
+        File(javaClass.getResource("/builders-fixture/src")!!.toURI()).copyRecursively(projectDir.resolve("src"))
+        projectDir.resolve("src/main/AndroidManifest.xml")
+            .writeText("""<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application/></manifest>""")
+        projectDir.resolve("local.properties").writeText("sdk.dir=${androidSdk().absolutePath.replace('\\', '/')}\n")
+        projectDir.resolve("settings.gradle.kts").writeText(
+            """
+            pluginManagement {
+                repositories {
+                    maven(url = "${repo.replace('\\', '/')}")
+                    google()
+                    mavenCentral()
+                    gradlePluginPortal()
+                }
+            }
+            dependencyResolutionManagement {
+                repositories { google(); mavenCentral() }
+            }
+            rootProject.name = "fixture"
+            """.trimIndent()
+        )
+        val androidPlugin = if (app) "com.android.application" else "com.android.library"
+        val kotlinPlugin = kotlinVersion?.let { """kotlin("android") version "$it"""" } ?: ""
+        projectDir.resolve("build.gradle.kts").writeText(
+            """
+            plugins {
+                id("$androidPlugin") version "$agpVersion"
+                $kotlinPlugin
+                id("io.github.microgeant.scarabuff") version "$pluginVersion"
+            }
+
+            android {
+                namespace = "com.probe.android"
+                compileSdk = 36
+                defaultConfig {
+                    minSdk = 24
+                    ${if (app) "applicationId = \"com.probe.android\"" else ""}
+                }
+                compileOptions {
+                    sourceCompatibility = JavaVersion.VERSION_17
+                    targetCompatibility = JavaVersion.VERSION_17
+                }
+            }
+            ${if (kotlinVersion != null) "kotlin { jvmToolchain(17) }" else ""}
+
+            dependencies {
+                testImplementation("io.grpc:grpc-inprocess:1.70.0")
+                testImplementation("io.grpc:grpc-netty:1.70.0")
+                testImplementation("io.grpc:grpc-okhttp:1.70.0")
+                testImplementation("org.junit.jupiter:junit-jupiter:5.10.1")
+                testImplementation("com.google.truth:truth:1.4.0")
+                testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.10.1")
+            }
+
+            tasks.withType<Test>().configureEach { useJUnitPlatform() }
+            """.trimIndent()
+        )
+    }
+
+    /**
+     * The Android SDK: `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or Android Studio's default location.
+     * Without one the Android tests are skipped locally, but fail on CI, where they must run.
+     */
+    private fun androidSdk(): File {
+        val candidates = listOfNotNull(
+            System.getenv("ANDROID_HOME"),
+            System.getenv("ANDROID_SDK_ROOT"),
+            System.getProperty("user.home") + "/Library/Android/sdk",
+            System.getProperty("user.home") + "/Android/Sdk",
+        ).map(::File)
+        val sdk = candidates.firstOrNull { it.resolve("platforms").isDirectory }
+        if (sdk == null && System.getenv("CI") != null) error("No Android SDK found; tried $candidates")
+        assumeTrue(sdk != null, "No Android SDK found; tried $candidates")
+        return sdk!!
+    }
+
     /** Number of passing tests in one of the fixture's JUnit reports. */
-    private fun testCount(testClass: String): Int {
-        val report = projectDir.resolve("build/test-results/test/TEST-$testClass.xml").readText()
+    private fun testCount(testClass: String, task: String = "test"): Int {
+        val report = projectDir.resolve("build/test-results/$task/TEST-$testClass.xml").readText()
         val tests = Regex("""tests="(\d+)"""").find(report)!!.groupValues[1].toInt()
         val failed = Regex("""(?:failures|errors)="(\d+)"""").findAll(report).sumOf { it.groupValues[1].toInt() }
         return tests - failed
@@ -136,6 +219,36 @@ class ScarabuffPluginFunctionalTest {
         assertThat(testCount("com.scarabuff.example.EchoRoundTripTest")).isEqualTo(5)
         assertThat(testCount("com.scarabuff.example.RequiredFieldsTest")).isEqualTo(4)
         assertThat(testCount("com.probe.builders.BuildersTest")).isEqualTo(22)
+    }
+
+    /**
+     * The plugin in an Android module: an app on AGP 9 with its built-in Kotlin, like most new
+     * apps, and a library on AGP 8 with the Kotlin Android plugin. Each variant gets generated
+     * sources; the debug ones run every test the JVM fixture runs, and release must build too.
+     */
+    @ParameterizedTest(name = "AGP {0} {1}, Gradle {2}, Kotlin {3}")
+    @CsvSource(
+        "9.0.1, app, 9.1.0, built-in",
+        "8.13.0, library, 8.14.6, 2.1.21",
+    )
+    fun `an Android module builds and its tests pass`(agpVersion: String, kind: String, gradleVersion: String, kotlin: String) {
+        androidFixture(agpVersion, app = kind == "app", kotlinVersion = kotlin.takeUnless { it == "built-in" })
+
+        val result = runner(gradleVersion, "testDebugUnitTest", "assembleRelease").build()
+
+        assertThat(result.task(":generateDebugScarabuffSources")?.outcome).isEqualTo(TaskOutcome.SUCCESS)
+        assertThat(result.task(":generateReleaseScarabuffSources")?.outcome).isEqualTo(TaskOutcome.SUCCESS)
+        assertThat(result.task(":testDebugUnitTest")?.outcome).isEqualTo(TaskOutcome.SUCCESS)
+        val task = "testDebugUnitTest"
+        assertThat(testCount("com.scarabuff.example.EchoRoundTripTest", task)).isEqualTo(5)
+        assertThat(testCount("com.scarabuff.example.StreamingBuilderReuseTest", task)).isEqualTo(3)
+        assertThat(testCount("com.scarabuff.example.RequiredFieldsTest", task)).isEqualTo(4)
+        assertThat(testCount("com.scarabuff.example.MarshallerTest", task)).isEqualTo(3)
+        assertThat(testCount("com.probe.builders.BuildersTest", task)).isEqualTo(22)
+
+        // Nothing changed, so nothing is generated again.
+        val second = runner(gradleVersion, "testDebugUnitTest").build()
+        assertThat(second.task(":generateDebugScarabuffSources")?.outcome).isEqualTo(TaskOutcome.UP_TO_DATE)
     }
 
     @Test

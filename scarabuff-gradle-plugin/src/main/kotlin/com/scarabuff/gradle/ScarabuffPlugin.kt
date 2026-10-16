@@ -10,11 +10,11 @@ import org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension
 
 /**
  * Applies the `scarabuff { ... }` extension and a `generateScarabuffSources` task that runs
- * `flatc --kotlin` + the Kotlin coroutine generator, wiring the output into the `main` source
- * set.
+ * `flatc --kotlin` + the Kotlin coroutine generator, wiring the output into the module's sources.
  *
- * Requires `org.jetbrains.kotlin.jvm` to also be applied (source-set wiring for the generated
- * Kotlin sources is deferred until that plugin is present, so apply order doesn't matter).
+ * Works in a Kotlin/JVM module (`org.jetbrains.kotlin.jvm`) and in an Android library or
+ * application module (`com.android.library`, `com.android.application`; see [AndroidSupport]).
+ * Each is wired once its plugin is applied, so apply order doesn't matter.
  */
 class ScarabuffPlugin : Plugin<Project> {
 
@@ -25,7 +25,7 @@ class ScarabuffPlugin : Plugin<Project> {
         extension.flatc.convention(project.providers.environmentVariable("FLATC"))
         extension.flatbuffersVersion.convention(RUNTIME_DEPENDENCIES.first { it.startsWith("$FLATBUFFERS_JAVA:") }.substringAfterLast(':'))
 
-        val generateTask = project.tasks.register("generateScarabuffSources", GenerateScarabuffSourcesTask::class.java) { task ->
+        val configureTask = { task: GenerateScarabuffSourcesTask ->
             task.schemaDir.set(extension.schemaDir)
             task.flatc.set(extension.flatc)
             task.flatcVersion.set(extension.flatcVersion)
@@ -33,33 +33,54 @@ class ScarabuffPlugin : Plugin<Project> {
             task.flatcIdentity.set(flatcIdentity(project, extension))
             task.kotlinPackageSuffix.set(extension.kotlinPackageSuffix)
             task.generateBuilders.set(extension.generateBuilders)
-            task.outputDir.set(extension.outputDir)
             task.group = "scarabuff"
             task.description = "Generates FlatBuffers + gRPC Kotlin coroutine sources from .fbs schemas"
         }
 
         project.plugins.withId("org.jetbrains.kotlin.jvm") {
+            val generateTask = project.tasks.register("generateScarabuffSources", GenerateScarabuffSourcesTask::class.java) { task ->
+                configureTask(task)
+                task.outputDir.set(extension.outputDir)
+            }
             // `api`, not `implementation`: the generated classes expose these libraries' types, so
             // a module depending on the schema module needs them on its compile classpath too.
-            project.configurations.named("api") { api ->
-                api.dependencies.addAllLater(
-                    extension.addRuntimeDependencies.map { add ->
-                        if (!add) return@map emptyList()
-                        RUNTIME_DEPENDENCIES.map { notation ->
-                            // flatbuffers-java follows flatbuffersVersion; the rest are fixed.
-                            if (notation.startsWith("$FLATBUFFERS_JAVA:")) {
-                                project.dependencies.create("$FLATBUFFERS_JAVA:${extension.flatbuffersVersion.get()}")
-                            } else {
-                                project.dependencies.create(notation)
-                            }
-                        }
-                    }
-                )
-            }
+            addRuntimeDependencies(project, extension, "api")
             extension.flatcVersion.convention(flatbuffersJavaVersion(project))
             project.extensions.getByType(KotlinJvmProjectExtension::class.java)
                 .sourceSets.getByName("main").kotlin.srcDir(extension.outputDir)
             project.tasks.named("compileKotlin") { it.dependsOn(generateTask) }
+        }
+        // A library exposes the generated types to modules depending on it, like a JVM module; an
+        // app has no consumers. Android has a compile classpath per variant, so flatc follows
+        // flatbuffersVersion rather than whichever flatbuffers-java one variant resolves.
+        project.plugins.withId("com.android.library") {
+            addRuntimeDependencies(project, extension, "api")
+            extension.flatcVersion.convention(extension.flatbuffersVersion)
+            AndroidSupport.configure(project, configureTask)
+        }
+        project.plugins.withId("com.android.application") {
+            addRuntimeDependencies(project, extension, "implementation")
+            extension.flatcVersion.convention(extension.flatbuffersVersion)
+            AndroidSupport.configure(project, configureTask)
+        }
+    }
+
+    /** The libraries the generated code compiles against, unless [ScarabuffExtension.addRuntimeDependencies] is off. */
+    private fun addRuntimeDependencies(project: Project, extension: ScarabuffExtension, configuration: String) {
+        project.configurations.named(configuration) { config ->
+            config.dependencies.addAllLater(
+                extension.addRuntimeDependencies.map { add ->
+                    if (!add) return@map emptyList()
+                    RUNTIME_DEPENDENCIES.map { notation ->
+                        // flatbuffers-java follows flatbuffersVersion; the rest are fixed.
+                        if (notation.startsWith("$FLATBUFFERS_JAVA:")) {
+                            project.dependencies.create("$FLATBUFFERS_JAVA:${extension.flatbuffersVersion.get()}")
+                        } else {
+                            project.dependencies.create(notation)
+                        }
+                    }
+                }
+            )
         }
     }
 
